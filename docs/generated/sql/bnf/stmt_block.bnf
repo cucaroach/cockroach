@@ -1509,6 +1509,7 @@ select_limit ::=
 	| offset_clause limit_clause
 	| limit_clause
 	| offset_clause
+	| step_clause
 
 opt_for_locking_clause ::=
 	for_locking_clause
@@ -2043,6 +2044,9 @@ offset_clause ::=
 	'OFFSET' a_expr
 	| 'OFFSET' select_fetch_first_value row_or_rows
 
+step_clause ::=
+	'STEP' a_expr
+
 generic_set ::=
 	var_name to_or_eq var_list
 
@@ -2081,6 +2085,7 @@ type_func_name_crdb_extra_keyword ::=
 cockroachdb_extra_reserved_keyword ::=
 	'INDEX'
 	| 'NOTHING'
+	| 'STEP'
 
 type_func_name_keyword ::=
 	type_func_name_no_crdb_extra_keyword

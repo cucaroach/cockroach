@@ -693,6 +693,24 @@ func (e *distSQLSpecExecFactory) ConstructLimit(
 	return plan, nil
 }
 
+func (e *distSQLSpecExecFactory) ConstructStep(
+	input exec.Node, stepExpr tree.TypedExpr,
+) (exec.Node, error) {
+	physPlan, plan := getPhysPlan(input)
+	recommendation := e.checkExprsAndMaybeMergeLastStage(nil /* exprs */, physPlan)
+	step, err := evalStep(e.planner.EvalContext(), stepExpr)
+	if err != nil {
+		return nil, err
+	}
+	if err = physPlan.AddStep(step, e.getPlanCtx(recommendation)); err != nil {
+		return nil, err
+	}
+	// Since addition of limit and/or offset doesn't change any properties of
+	// the physical plan, we don't need to update any of those (like
+	// PlanToStreamColMap, etc).
+	return plan, nil
+}
+
 func (e *distSQLSpecExecFactory) ConstructMax1Row(
 	input exec.Node, errorText string,
 ) (exec.Node, error) {

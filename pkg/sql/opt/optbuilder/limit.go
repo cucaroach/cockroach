@@ -37,4 +37,11 @@ func (b *Builder) buildLimit(limit *tree.Limit, parentScope, inScope *scope) {
 		)
 		inScope.expr = b.factory.ConstructLimit(input, limit, inScope.makeOrderingChoice())
 	}
+	if limit.Step != nil {
+		input := inScope.expr.(memo.RelExpr)
+		offset := b.resolveAndBuildScalar(
+			limit.Step, types.Int, exprKindStep, tree.RejectSpecial, parentScope,
+		)
+		inScope.expr = b.factory.ConstructStep(input, offset, inScope.makeOrderingChoice())
+	}
 }

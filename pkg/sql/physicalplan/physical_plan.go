@@ -877,6 +877,14 @@ func (p *PhysicalPlan) AddLimit(count int64, offset int64, exprCtx ExprContext) 
 	return nil
 }
 
+func (p *PhysicalPlan) AddStep(step int64, exprCtx ExprContext) error {
+	if step < 1 {
+		return errors.Errorf("step must be greater than 0")
+	}
+
+	return nil
+}
+
 // PopulateEndpoints processes p.Streams and adds the corresponding
 // StreamEndpointSpecs to the processors' input and output specs. This should be
 // used when the plan is completed and ready to be executed.

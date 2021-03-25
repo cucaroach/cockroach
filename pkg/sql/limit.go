@@ -26,6 +26,12 @@ type limitNode struct {
 	offsetExpr tree.TypedExpr
 }
 
+// step.go?
+type stepNode struct {
+	plan     planNode
+	stepExpr tree.TypedExpr
+}
+
 func (n *limitNode) startExec(params runParams) error {
 	panic("limitNode cannot be run in local mode")
 }
@@ -80,4 +86,8 @@ func evalLimit(
 		}
 	}
 	return count, offset, nil
+}
+
+func evalStep(evalCtx *tree.EvalContext, stepExpr tree.TypedExpr) (step int64, err error) {
+	return 0, nil
 }

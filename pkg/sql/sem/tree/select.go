@@ -709,8 +709,8 @@ func (node *Order) Equal(other *Order) bool {
 
 // Limit represents a LIMIT clause.
 type Limit struct {
-	Offset, Count Expr
-	LimitAll      bool
+	Offset, Count, Step Expr
+	LimitAll            bool
 }
 
 // Format implements the NodeFormatter interface.

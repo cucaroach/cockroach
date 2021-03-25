@@ -1141,6 +1141,47 @@ func (b *logicalPropsBuilder) buildOffsetProps(offset *OffsetExpr, rel *props.Re
 	if !b.disableStats {
 		b.sb.buildOffset(offset, rel)
 	}
+
+}
+
+func (b *logicalPropsBuilder) buildStepProps(step *StepExpr, rel *props.Relational) {
+	BuildSharedProps(step, &rel.Shared)
+
+	inputProps := step.Input.Relational()
+
+	// Output Columns
+	// --------------
+	// Output columns are inherited from input.
+	rel.OutputCols = inputProps.OutputCols
+
+	// Not Null Columns
+	// ----------------
+	// Not null columns are inherited from input.
+	rel.NotNullCols = inputProps.NotNullCols
+
+	// Outer Columns
+	// -------------
+	// Outer columns were already derived by BuildSharedProps.
+
+	// Functional Dependencies
+	// -----------------------
+	// Inherit functional dependencies from input.
+	rel.FuncDeps.CopyFrom(&inputProps.FuncDeps)
+
+	// Cardinality
+	// -----------
+	// Offset decreases the number of rows that are passed through from input.
+	rel.Cardinality = inputProps.Cardinality
+	if cnst, ok := step.Step.(*ConstExpr); ok {
+		constOffset := int64(*cnst.Value.(*tree.DInt))
+		if constOffset > 0 {
+			if constOffset > math.MaxUint32 {
+				constOffset = math.MaxUint32
+			}
+			rel.Cardinality = inputProps.Cardinality.Skip(uint32(constOffset))
+		}
+	}
+
 }
 
 func (b *logicalPropsBuilder) buildMax1RowProps(max1Row *Max1RowExpr, rel *props.Relational) {

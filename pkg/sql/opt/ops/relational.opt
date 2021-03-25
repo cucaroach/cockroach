@@ -953,7 +953,7 @@ define LocalityOptimizedSearch {
 
 # Limit returns a limited subset of the results in the input relation. The limit
 # expression is a scalar value; the operator returns at most this many rows. The
-# Orering field is a physical.OrderingChoice which indicates the row ordering
+# Ordering field is a physical.OrderingChoice which indicates the row ordering
 # required from the input (the first rows with respect to this ordering are
 # returned).
 [Relational]
@@ -969,6 +969,14 @@ define Limit {
 define Offset {
     Input RelExpr
     Offset ScalarExpr
+    Ordering OrderingChoice
+}
+
+# Step returns every N-th row
+[Relational]
+define Step {
+    Input RelExpr
+    Step ScalarExpr
     Ordering OrderingChoice
 }
 

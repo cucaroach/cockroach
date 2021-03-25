@@ -208,6 +208,9 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 	case *memo.LimitExpr, *memo.OffsetExpr:
 		ep, err = b.buildLimitOffset(e)
 
+	case *memo.StepExpr:
+		ep, err = b.buildStep(e)
+
 	case *memo.SortExpr:
 		ep, err = b.buildSort(t)
 
@@ -1374,6 +1377,22 @@ func (b *Builder) buildLimitOffset(e memo.RelExpr) (execPlan, error) {
 	} else {
 		node, err = b.factory.ConstructLimit(input.root, nil, expr)
 	}
+	if err != nil {
+		return execPlan{}, err
+	}
+	return execPlan{root: node, outputCols: input.outputCols}, nil
+}
+
+func (b *Builder) buildStep(e memo.RelExpr) (execPlan, error) {
+	input, err := b.buildRelational(e.Child(0).(memo.RelExpr))
+	if err != nil {
+		return execPlan{}, err
+	}
+	expr, err := b.buildScalar(nil, e.Child(1).(opt.ScalarExpr))
+	if err != nil {
+		return execPlan{}, err
+	}
+	node, err := b.factory.ConstructStep(input.root, expr)
 	if err != nil {
 		return execPlan{}, err
 	}

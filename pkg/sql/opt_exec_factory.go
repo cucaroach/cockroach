@@ -897,6 +897,14 @@ func (ef *execFactory) ConstructLimit(
 	}, nil
 }
 
+func (ef *execFactory) ConstructStep(input exec.Node, step tree.TypedExpr) (exec.Node, error) {
+	plan := input.(planNode)
+	return &stepNode{
+		plan:     plan,
+		stepExpr: step,
+	}, nil
+}
+
 // ConstructMax1Row is part of the exec.Factory interface.
 func (ef *execFactory) ConstructMax1Row(input exec.Node, errorText string) (exec.Node, error) {
 	plan := input.(planNode)

@@ -311,6 +311,11 @@ define Limit {
     Offset tree.TypedExpr
 }
 
+define Step {
+    Input exec.Node
+    Step tree.TypedExpr
+}
+
 # Max1Row permits at most one row from the given input node, causing an error
 # with the given text at runtime if the node tries to return more than one row.
 define Max1Row {

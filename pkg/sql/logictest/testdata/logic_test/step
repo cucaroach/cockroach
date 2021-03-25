@@ -1,0 +1,7 @@
+SELECT generate_series FROM generate_series(1, 10) ORDER BY generate_series STEP 2;
+----
+1
+3
+5
+7
+9

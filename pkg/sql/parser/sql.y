@@ -689,7 +689,7 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %token <str> SHARE SHOW SIMILAR SIMPLE SKIP SKIP_MISSING_FOREIGN_KEYS
 %token <str> SKIP_MISSING_SEQUENCES SKIP_MISSING_SEQUENCE_OWNERS SKIP_MISSING_VIEWS SMALLINT SMALLSERIAL SNAPSHOT SOME SPLIT SQL
 
-%token <str> START STATISTICS STATUS STDIN STREAM STRICT STRING STORAGE STORE STORED STORING SUBSTRING
+%token <str> START STATISTICS STATUS STEP STDIN STREAM STRICT STRING STORAGE STORE STORED STORING SUBSTRING
 %token <str> SURVIVE SURVIVAL SYMMETRIC SYNTAX SYSTEM SQRT SUBSCRIPTION STATEMENTS
 
 %token <str> TABLE TABLES TABLESPACE TEMP TEMPLATE TEMPORARY TENANT TESTING_RELOCATE EXPERIMENTAL_RELOCATE TEXT THEN
@@ -1079,7 +1079,7 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %type <bool> opt_unique opt_concurrently opt_cluster opt_without_index
 %type <bool> opt_index_access_method
 
-%type <*tree.Limit> limit_clause offset_clause opt_limit_clause
+%type <*tree.Limit> limit_clause offset_clause opt_limit_clause step_clause
 %type <tree.Expr> select_fetch_first_value
 %type <empty> row_or_rows
 %type <empty> first_or_next
@@ -8830,6 +8830,7 @@ select_limit:
   }
 | limit_clause
 | offset_clause
+| step_clause  // TODO think about combo semantics
 
 opt_select_limit:
   select_limit { $$.val = $1.limit() }
@@ -8880,6 +8881,12 @@ offset_clause:
 | OFFSET select_fetch_first_value row_or_rows
   {
     $$.val = &tree.Limit{Offset: $2.expr()}
+  }
+
+step_clause:
+  STEP a_expr
+  {
+    $$.val = &tree.Limit{Step: $2.expr()}
   }
 
 // Allowing full expressions without parentheses causes various parsing
@@ -12810,5 +12817,6 @@ reserved_keyword:
 cockroachdb_extra_reserved_keyword:
   INDEX
 | NOTHING
+| STEP
 
 %%

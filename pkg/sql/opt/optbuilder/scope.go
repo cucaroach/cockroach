@@ -139,6 +139,7 @@ const (
 	exprKindOrderBy
 	exprKindReturning
 	exprKindSelect
+	exprKindStep
 	exprKindValues
 	exprKindWhere
 	exprKindWindowFrameStart
