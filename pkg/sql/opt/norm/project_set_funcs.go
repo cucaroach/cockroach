@@ -46,6 +46,10 @@ func (c *CustomFuncs) CanConstructValuesFromZips(zip memo.ZipExpr) bool {
 			// Unnest has more than one argument.
 			return false
 		}
+		// Multiple columns are not supported.
+		if len(zip[i].Cols) != 1 {
+			return false
+		}
 		if !c.IsStaticArray(fn.Args[0]) && !c.WrapsJSONArray(fn.Args[0]) {
 			// Argument is not an ArrayExpr or ConstExpr wrapping a DArray or DJSON.
 			return false
@@ -83,6 +87,7 @@ func (c *CustomFuncs) ConstructValuesFromZips(zip memo.ZipExpr) memo.RelExpr {
 		default:
 			panic(errors.AssertionFailedf("invalid function name: %v", function.Name))
 		}
+		// Only one column is supported, enforced in CanConstructValuesFromZips.
 		outColIDs[i] = zip[i].Cols[0]
 	}
 

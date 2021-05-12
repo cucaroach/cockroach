@@ -206,7 +206,7 @@ var generators = map[string]builtinDefinition{
 				if len(args) == 0 || args[0].ResolvedType().Family() == types.UnknownFamily {
 					return tree.UnknownReturnType
 				}
-				return args[0].ResolvedType().ArrayContents()
+				return nestedArrayContents(args[0].ResolvedType())
 			},
 			makeArrayGenerator,
 			"Returns the input array as a set of rows",
@@ -226,7 +226,7 @@ var generators = map[string]builtinDefinition{
 					if arg.ResolvedType().Family() == types.UnknownFamily {
 						return tree.UnknownReturnType
 					}
-					returnTypes[i] = arg.ResolvedType().ArrayContents()
+					returnTypes[i] = nestedArrayContents(arg.ResolvedType())
 					labels[i] = "unnest"
 				}
 				return types.MakeLabeledTuple(returnTypes, labels)
@@ -393,6 +393,13 @@ The output can be used to recreate a database.'
 			tree.VolatilityVolatile,
 		),
 	),
+}
+
+func nestedArrayContents(typ *types.T) *types.T {
+	for typ.ArrayContents() != nil {
+		typ = typ.ArrayContents()
+	}
+	return typ
 }
 
 func makeGeneratorOverload(
