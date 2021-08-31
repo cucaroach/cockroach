@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
@@ -479,7 +480,8 @@ func (h *harness) runSimple(tb testing.TB, query benchQuery, phase Phase) {
 
 	root := execMemo.RootExpr()
 	eb := execbuilder.New(
-		exec.StubFactory{},
+		//		exec.StubFactory{},
+		explain.NewPlanGistFactory(exec.StubFactory{}),
 		&h.optimizer,
 		execMemo,
 		nil, /* catalog */
