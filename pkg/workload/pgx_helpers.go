@@ -90,7 +90,7 @@ func NewMultiConnPool(
 			}
 			// Disable the automatic prepared statement cache. We've seen a lot of
 			// churn in this cache since workloads create many of different queries.
-			connCfg.ConnConfig.BuildStatementCache = nil
+			//connCfg.ConnConfig.BuildStatementCache = nil
 			connCfg.ConnConfig.LogLevel = pgx.LogLevelWarn
 			connCfg.ConnConfig.Logger = pgxLogger{}
 			connCfg.MaxConns = int32(numConns)

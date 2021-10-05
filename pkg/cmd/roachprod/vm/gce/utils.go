@@ -131,14 +131,24 @@ root soft core unlimited
 root hard core unlimited
 EOF
 
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+echo 2 > /proc/sys/vm/overcommit_memory
+echo 100 > /proc/sys/vm/overcommit_ratio
+
 mkdir -p /mnt/data1/cores
 chmod a+w /mnt/data1/cores
-CORE_PATTERN="/mnt/data1/cores/core.%e.%p.%h.%t"
-echo "$CORE_PATTERN" > /proc/sys/kernel/core_pattern
+COMP_SCRIPT=/core_compress.sh
+
+# The '>' redirection can't appear in core_pattern so move it to a script.
+cat <<'EOF' > $COMP_SCRIPT
+#!/bin/sh
+exec /bin/gzip -f - >/mnt/data1/cores/core-$1.$2.$3.$4.gz
+EOF
+chmod +x $COMP_SCRIPT
+CORE_PATTERN="|$COMP_SCRIPT %e %p %h %t"
 sed -i'~' 's/enabled=1/enabled=0/' /etc/default/apport
 sed -i'~' '/.*kernel\\.core_pattern.*/c\\' /etc/sysctl.conf
 echo "kernel.core_pattern=$CORE_PATTERN" >> /etc/sysctl.conf
-
 sysctl --system  # reload sysctl settings
 
 sudo apt-get update -q
@@ -181,6 +191,9 @@ for service in apport.service atd.service; do
   systemctl stop $service
   systemctl mask $service
 done
+
+# For some reason doing this here is necessary, does stopping apport.service reset it to "core" maybe?
+sysctl -w kernel.core_pattern="$CORE_PATTERN"
 
 sudo touch /mnt/data1/.roachprod-initialized
 `

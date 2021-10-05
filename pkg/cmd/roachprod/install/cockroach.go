@@ -439,6 +439,7 @@ func (h *crdbInstallHelper) generateStartCmd(
 		EnvVars: append(append([]string{
 			"GOTRACEBACK=crash",
 			"COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=1",
+			"GODEBUG=gctrace=1",
 		}, h.c.Env...), h.getEnvVars()...),
 		Binary:           cockroachNodeBinary(h.c, nodes[nodeIdx]),
 		StartCmd:         startCmd,
