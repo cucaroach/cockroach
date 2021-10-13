@@ -16,8 +16,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"hash"
-	"hash/fnv"
-	"io"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -79,6 +77,8 @@ func (fp PlanGist) Hash() uint64 {
 // PlanGistFactory is an exec.Factory that produces a gist by eaves
 // dropping on the exec builder phase of compilation.
 type PlanGistFactory struct {
+	hash uint64
+
 	wrappedFactory exec.Factory
 	// buffer is used for reading and writing (i.e. decoding and encoding) but on
 	// on the write path it is used via the writer field which is a multi-writer
@@ -87,22 +87,49 @@ type PlanGistFactory struct {
 	// hash.  This allows the hash to be id agnostic (ie hash's will be stable
 	// across plans from different databases with different DDL history).
 	buffer bytes.Buffer
-	hash   hash.Hash64
-	writer io.Writer
+	//writer io.Writer
 
 	nodeStack []*Node
 	catalog   cat.Catalog
 }
 
 var _ exec.Factory = &PlanGistFactory{}
+var _ hash.Hash64 = &PlanGistFactory{}
+
+func (f *PlanGistFactory) Write(bs []byte) (int, error) {
+	hash := f.hash
+	for _, c := range bs {
+		hash *= 1099511628211
+		hash ^= uint64(c)
+	}
+	f.hash = hash
+	return len(bs), nil
+}
+
+func (f *PlanGistFactory) Sum64() uint64 {
+	return f.hash
+}
+
+func (f *PlanGistFactory) Size() int { return 8 }
+
+func (f *PlanGistFactory) Sum(in []byte) []byte {
+	v := uint64(f.hash)
+	return append(in, byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+func (f *PlanGistFactory) BlockSize() int { return 1 }
+
+func (f *PlanGistFactory) Reset() { f.hash = 14695981039346656037 }
+func (f *PlanGistFactory) Init(wrappedFactory exec.Factory) {
+	f.wrappedFactory = wrappedFactory
+	f.hash = 14695981039346656037
+	f.encodeInt(version)
+}
 
 // NewPlanGistFactory creates a new PlanGistFactory.
 func NewPlanGistFactory(wrappedFactory exec.Factory) *PlanGistFactory {
 	f := new(PlanGistFactory)
-	f.wrappedFactory = wrappedFactory
-	f.hash = fnv.New64()
-	f.writer = io.MultiWriter(&f.buffer, f.hash)
-	f.encodeInt(version)
+	f.Init(wrappedFactory)
 	return f
 }
 
@@ -121,7 +148,7 @@ func (f *PlanGistFactory) ConstructPlan(
 // PlanGist returns a pointer to a PlanGist.
 func (f *PlanGistFactory) PlanGist() PlanGist {
 	return PlanGist{gist: base64.StdEncoding.EncodeToString(f.buffer.Bytes()),
-		hash: f.hash.Sum64()}
+		hash: f.hash}
 }
 
 // DecodePlanGistToRows converts a gist to a logical plan and returns the rows.
@@ -227,7 +254,11 @@ func (f *PlanGistFactory) encodeOperator(op execOperator) {
 func (f *PlanGistFactory) encodeInt(i int) {
 	var buf [binary.MaxVarintLen64]byte
 	n := binary.PutVarint(buf[:], int64(i))
-	_, err := f.writer.Write(buf[:n])
+	_, err := f.buffer.Write(buf[:n])
+	if err != nil {
+		panic(err)
+	}
+	_, err = f.Write(buf[:n])
 	if err != nil {
 		panic(err)
 	}
@@ -251,7 +282,7 @@ func (f *PlanGistFactory) encodeDataSource(id cat.StableID, name tree.Name) {
 	if err != nil {
 		panic(err)
 	}
-	_, err = f.hash.Write([]byte(string(name)))
+	_, err = f.Write([]byte(string(name)))
 	if err != nil {
 		panic(err)
 	}
@@ -316,7 +347,12 @@ func (f *PlanGistFactory) decodeResultColumns() colinfo.ResultColumns {
 }
 
 func (f *PlanGistFactory) encodeByte(b byte) {
-	_, err := f.writer.Write([]byte{b})
+	bs := []byte{b}
+	_, err := f.buffer.Write(bs)
+	if err != nil {
+		panic(err)
+	}
+	_, err = f.Write(bs)
 	if err != nil {
 		panic(err)
 	}
@@ -357,7 +393,7 @@ func (f *PlanGistFactory) decodeColumnOrdering() colinfo.ColumnOrdering {
 }
 
 func (f *PlanGistFactory) encodeScanParams(params exec.ScanParams) {
-	err := params.NeededCols.Encode(f.writer)
+	err := params.NeededCols.Encode(&f.buffer)
 	if err != nil {
 		panic(err)
 	}
