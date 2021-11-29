@@ -118,6 +118,7 @@ func (r *commandResult) Close(ctx context.Context, t sql.TransactionStatusIndica
 
 	r.conn.writerState.fi.registerCmd(r.pos)
 	if r.err != nil {
+
 		r.conn.bufferErr(ctx, r.err)
 		return
 	}

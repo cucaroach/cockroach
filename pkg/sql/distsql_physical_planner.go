@@ -2397,6 +2397,154 @@ func (dsp *DistSQLPlanner) createPlanForLookupJoin(
 	return plan, nil
 }
 
+type lookupJoinPlanningInfo struct {
+	table catalog.TableDescriptor
+	index catalog.Index
+
+	lockingStrength       descpb.ScanLockingStrength
+	lockingWaitPolicy     descpb.ScanLockingWaitPolicy
+	containsSystemColumns bool
+
+	// joinType is either INNER, LEFT_OUTER, LEFT_SEMI, or LEFT_ANTI.
+	joinType descpb.JoinType
+
+	// eqCols represents the part of the join condition used to perform
+	// the lookup into the index. It should only be set when lookupExpr is empty.
+	// eqCols identifies the columns from the input which are used for the
+	// lookup. These correspond to a prefix of the index columns (of the index we
+	// are looking up into).
+	eqCols []int
+
+	// eqColsAreKey is true when each lookup can return at most one row.
+	eqColsAreKey bool
+
+	// lookupExpr represents the part of the join condition used to perform
+	// the lookup into the index. It should only be set when eqCols is empty.
+	// lookupExpr is used instead of eqCols when the lookup condition is
+	// more complicated than a simple equality between input columns and index
+	// columns. In this case, lookupExpr specifies the expression that will be
+	// used to construct the spans for each lookup.
+	lookupExpr tree.TypedExpr
+
+	// If remoteLookupExpr is set, this is a locality optimized lookup join. In
+	// this case, lookupExpr contains the lookup join conditions targeting ranges
+	// located on local nodes (relative to the gateway region), and
+	// remoteLookupExpr contains the lookup join conditions targeting remote
+	// nodes. The optimizer will only plan a locality optimized lookup join if it
+	// is known that each lookup returns at most one row. This fact allows the
+	// execution engine to use the local conditions in lookupExpr first, and if a
+	// match is found locally for each input row, there is no need to search
+	// remote nodes. If a local match is not found for all input rows, the
+	// execution engine uses remoteLookupExpr to search remote nodes.
+	remoteLookupExpr tree.TypedExpr
+
+	// columns are the produced columns, namely the input columns and (unless the
+	// join type is semi or anti join) the columns in the table scanNode.
+	columns colinfo.ResultColumns
+
+	// onCond is any ON condition to be used in conjunction with the implicit
+	// equality condition on eqCols or the conditions in lookupExpr.
+	onCond tree.TypedExpr
+
+	isSecondJoinInPairedJoiner bool
+
+	reqOrdering ReqOrdering
+}
+
+// planLookupJoin creates a distributed plan for a lookup join.
+func (dsp *DistSQLPlanner) planLookupJoin(
+	planCtx *PlanningCtx, pi lookupJoinPlanningInfo,
+) (*PhysicalPlan, error) {
+	plan, err := dsp.createPhysPlanForPlanNode(planCtx, n.input)
+	if err != nil {
+		return nil, err
+	}
+
+	joinReaderSpec := execinfrapb.JoinReaderSpec{
+		Table:                    *pi.table.TableDesc(),
+		Type:                     pi.joinType,
+		Visibility:               execinfra.ScanVisibilityPublicAndNotPublic,
+		LockingStrength:          pi.lockingStrength,
+		LockingWaitPolicy:        pi.lockingWaitPolicy,
+		MaintainOrdering:         len(pi.reqOrdering) > 0,
+		HasSystemColumns:         pi.containsSystemColumns,
+		LeftJoinWithPairedJoiner: pi.isSecondJoinInPairedJoiner,
+		LookupBatchBytesLimit:    dsp.distSQLSrv.TestingKnobs.JoinReaderBatchBytesLimit,
+	}
+	joinReaderSpec.IndexIdx, err = getIndexIdx(n.table.index, n.table.desc)
+	if err != nil {
+		return nil, err
+	}
+	joinReaderSpec.LookupColumns = make([]uint32, len(n.eqCols))
+	for i, col := range n.eqCols {
+		if plan.PlanToStreamColMap[col] == -1 {
+			panic("lookup column not in planToStreamColMap")
+		}
+		joinReaderSpec.LookupColumns[i] = uint32(plan.PlanToStreamColMap[col])
+	}
+	joinReaderSpec.LookupColumnsAreKey = n.eqColsAreKey
+
+	numInputNodeCols, planToStreamColMap, post, types :=
+		mappingHelperForLookupJoins(plan, n.input, n.table, false /* addContinuationCol */)
+
+	// Set the lookup condition.
+	var indexVarMap []int
+	if n.lookupExpr != nil {
+		indexVarMap = makeIndexVarMapForLookupJoins(numInputNodeCols, n.table, plan, &post)
+		var err error
+		joinReaderSpec.LookupExpr, err = physicalplan.MakeExpression(
+			n.lookupExpr, planCtx, indexVarMap,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if n.remoteLookupExpr != nil {
+		if n.lookupExpr == nil {
+			return nil, errors.AssertionFailedf("remoteLookupExpr is set but lookupExpr is not")
+		}
+		var err error
+		joinReaderSpec.RemoteLookupExpr, err = physicalplan.MakeExpression(
+			n.remoteLookupExpr, planCtx, indexVarMap,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Set the ON condition.
+	if n.onCond != nil {
+		if indexVarMap == nil {
+			indexVarMap = makeIndexVarMapForLookupJoins(numInputNodeCols, n.table, plan, &post)
+		}
+		var err error
+		joinReaderSpec.OnExpr, err = physicalplan.MakeExpression(
+			n.onCond, planCtx, indexVarMap,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if !n.joinType.ShouldIncludeRightColsInOutput() {
+		planToStreamColMap, post.OutputColumns, types = truncateToInputForLookupJoins(
+			numInputNodeCols, planToStreamColMap, post.OutputColumns, types)
+	}
+
+	// Instantiate one join reader for every stream. This is also necessary for
+	// correctness of paired-joins where this join is the second join -- it is
+	// necessary to have a one-to-one relationship between the first and second
+	// join processor.
+	plan.AddNoGroupingStage(
+		execinfrapb.ProcessorCoreUnion{JoinReader: &joinReaderSpec},
+		post,
+		types,
+		dsp.convertOrdering(planReqOrdering(n), planToStreamColMap),
+	)
+	plan.PlanToStreamColMap = planToStreamColMap
+	return plan, nil
+}
+
 // mappingHelperForLookupJoins creates slices etc. for the columns of
 // lookup-style joins (that involve an input that is used to lookup from a
 // table).

@@ -1490,6 +1490,7 @@ func (c *conn) writeRowDescription(
 	formatCodes []pgwirebase.FormatCode,
 	w io.Writer,
 ) error {
+
 	c.msgBuilder.initMsg(pgwirebase.ServerMsgRowDescription)
 	c.msgBuilder.putInt16(int16(len(columns)))
 	for i, column := range columns {

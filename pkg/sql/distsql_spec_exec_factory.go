@@ -664,7 +664,30 @@ func (e *distSQLSpecExecFactory) ConstructLookupJoin(
 	locking *tree.LockingItem,
 ) (exec.Node, error) {
 	// TODO (rohany): Implement production of system columns by the underlying scan here.
-	return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: lookup join")
+	if table.IsVirtualTable() {
+		return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: virtual table lookup join")
+	}
+
+	planCtx := e.getPlanCtx()
+	physPlan, inputPlan := getPhysPlan(input)
+
+	colCfg := makeScanColumnsConfig(table, lookupCols)
+
+	e.dsp.planLookupJoin(planCtx, lookupJoinPlanningInfo{
+		table:             table.(*optTable).desc,
+		index:             index.(*optIndex).idx,
+		lockingStrength:   descpb.ToScanLockingStrength(locking.Strength),
+		lockingWaitPolicy: descpb.ToScanLockingWaitPolicy(locking.WaitPolicy),
+	}
+	//desc := table.(*optTable).desc
+	//colCfg := makeScanColumnsConfig(table, lookupCols)
+	//lookupJoinPlanningInfo{
+	//	table:             desc,
+	//	index:             index.(*optIndex),
+	//	colCfg:            colCfg,
+	//	lockingStrength:   locking.Strength(),
+	//	lockingWaitPolicy: locking.WaitPolicy(),
+	//}
 }
 
 func (e *distSQLSpecExecFactory) ConstructInvertedJoin(

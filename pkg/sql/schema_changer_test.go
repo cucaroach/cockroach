@@ -2885,11 +2885,14 @@ CREATE TABLE t.test (
 	}
 
 	// Test that we only insert the necessary k/v's.
-	rows, err := sqlDB.Query(`
-	SET TRACING=on,kv,results;
+	_, err := sqlDB.Exec(`SET TRACING=on,kv,results;
 	INSERT INTO t.test VALUES (1, 2, 3, NULL, NULL, 6);
-	SET TRACING=off;
-	SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
+	SET TRACING=off;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := sqlDB.Query(`SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
 		message LIKE 'InitPut /Table/53/2%' ORDER BY message;`)
 	if err != nil {
 		t.Fatal(err)
