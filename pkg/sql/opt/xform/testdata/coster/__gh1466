@@ -1,0 +1,597 @@
+# Repro for #1466 support issue.  See the histogram value for 741184065689976846 to find the knifes edge
+# between good and bad plans.
+exec-ddl
+CREATE TABLE t1 (
+	id INT8 NOT NULL DEFAULT unique_rowid() PRIMARY KEY,
+	col INT8 NOT NULL,
+	hash STRING NOT NULL,
+	INDEX "col+id_idx" (col ASC, id ASC)
+)
+----
+
+exec-ddl
+ALTER TABLE
+   t1 INJECT STATISTICS '[
+{
+  "columns": [
+      "col"
+  ],
+  "created_at": "2022-03-02 23:35:24.04644",
+  "distinct_count": 13,
+  "histo_buckets": [
+      {
+          "distinct_range": 0,
+          "num_eq": 9334,
+          "num_range": 0,
+          "upper_bound": "711431153632542727"
+      },
+      {
+          "distinct_range": 0.3587517014356067,
+          "num_eq": 4759,
+          "num_range": 22,
+          "upper_bound": "732912068535189510"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 62999,
+          "num_range": 0,
+          "upper_bound": "733182606609481738"
+      },
+      {
+          "distinct_range": 4.383221640237367,
+          "num_eq": 4759,
+          "num_range": 275,
+          "upper_bound": "734649937190617102"
+      },
+      {
+          "distinct_range": 0.2580266583270271,
+          "num_eq": 6483,
+          "num_range": 22,
+          "upper_bound": "741128227092201483"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 29798,
+          "num_range": 0,
+          "upper_bound": "741172898827337742"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq_orig": 64631,
+          "num_eq_good_plan": 29500,
+          "num_eq_bad_plan": 29750,
+          "num_eq": 29750,
+          "num_range": 0,
+          "upper_bound": "741184065689976846"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 46835,
+          "num_range": 0,
+          "upper_bound": "741190530812346382"
+      }
+  ],
+  "histo_col_type": "INT8",
+  "name": "__auto__",
+  "null_count": 0,
+  "row_count": 229924
+}
+]'
+----
+
+optsteps
+SELECT
+  col, hash, id
+FROM
+ t1
+WHERE
+  col = 741184065689976846
+ORDER BY
+  id
+LIMIT
+  500
+----
+================================================================================
+Initial expression
+  Cost: 248731.30
+================================================================================
+  limit
+   ├── columns: col:2!null hash:3!null id:1!null
+   ├── internal-ordering: +1
+   ├── cardinality: [0 - 500]
+   ├── stats: [rows=500]
+   ├── cost: 248731.296
+   ├── key: (1)
+   ├── fd: ()-->(2), (1)-->(3)
+   ├── ordering: +1
+   ├── project
+   │    ├── columns: id:1!null col:2!null hash:3!null
+   │    ├── stats: [rows=35071.67]
+   │    ├── cost: 248726.286
+   │    ├── key: (1)
+   │    ├── fd: ()-->(2), (1)-->(3)
+   │    ├── ordering: +1
+   │    ├── limit hint: 500.00
+   │    └── select
+   │         ├── columns: id:1!null col:2!null hash:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
+   │         ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+   │         │   histogram(2)=  0        29750
+   │         │                <--- 741184065689976846
+   │         ├── cost: 248375.549
+   │         ├── key: (1)
+   │         ├── fd: ()-->(2), (1)-->(3-5)
+   │         ├── ordering: +1 opt(2) [actual: +1]
+   │         ├── limit hint: 500.00
+   │         ├── scan t1
+   │         │    ├── columns: id:1!null col:2!null hash:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
+   │         │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+   │         │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+   │         │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+   │         │    ├── cost: 248342.74
+   │         │    ├── key: (1)
+   │         │    ├── fd: (1)-->(2-5)
+   │         │    ├── ordering: +1
+   │         │    └── limit hint: 3277.92
+   │         └── filters
+   │              └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+   └── 500
+================================================================================
+PruneSelectCols
+  Cost: 244132.62
+================================================================================
+   limit
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── internal-ordering: +1
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 248731.296
+  + ├── cost: 244132.616
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1
+    ├── project
+    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    ├── stats: [rows=35071.67]
+  - │    ├── cost: 248726.286
+  + │    ├── cost: 244127.606
+    │    ├── key: (1)
+    │    ├── fd: ()-->(2), (1)-->(3)
+    │    ├── ordering: +1
+    │    ├── limit hint: 500.00
+    │    └── select
+  - │         ├── columns: id:1!null col:2!null hash:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
+  + │         ├── columns: id:1!null col:2!null hash:3!null
+    │         ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+    │         │   histogram(2)=  0        29750
+    │         │                <--- 741184065689976846
+  - │         ├── cost: 248375.549
+  + │         ├── cost: 243776.869
+    │         ├── key: (1)
+  - │         ├── fd: ()-->(2), (1)-->(3-5)
+  + │         ├── fd: ()-->(2), (1)-->(3)
+    │         ├── ordering: +1 opt(2) [actual: +1]
+    │         ├── limit hint: 500.00
+    │         ├── scan t1
+  - │         │    ├── columns: id:1!null col:2!null hash:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
+  + │         │    ├── columns: id:1!null col:2!null hash:3!null
+    │         │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+    │         │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+    │         │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+  - │         │    ├── cost: 248342.74
+  + │         │    ├── cost: 243744.06
+    │         │    ├── key: (1)
+  - │         │    ├── fd: (1)-->(2-5)
+  + │         │    ├── fd: (1)-->(2,3)
+    │         │    ├── ordering: +1
+    │         │    └── limit hint: 3277.92
+    │         └── filters
+    │              └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+    └── 500
+================================================================================
+EliminateProject
+  Cost: 243781.88
+================================================================================
+   limit
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── internal-ordering: +1
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 244132.616
+  + ├── cost: 243781.879
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1
+  - ├── project
+  + ├── select
+    │    ├── columns: id:1!null col:2!null hash:3!null
+  - │    ├── stats: [rows=35071.67]
+  - │    ├── cost: 244127.606
+  + │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  + │    │   histogram(2)=  0        29750
+  + │    │                <--- 741184065689976846
+  + │    ├── cost: 243776.869
+    │    ├── key: (1)
+    │    ├── fd: ()-->(2), (1)-->(3)
+    │    ├── ordering: +1
+    │    ├── limit hint: 500.00
+  - │    └── select
+  - │         ├── columns: id:1!null col:2!null hash:3!null
+  - │         ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  - │         │   histogram(2)=  0        29750
+  - │         │                <--- 741184065689976846
+  - │         ├── cost: 243776.869
+  - │         ├── key: (1)
+  - │         ├── fd: ()-->(2), (1)-->(3)
+  - │         ├── ordering: +1 opt(2) [actual: +1]
+  - │         ├── limit hint: 500.00
+  - │         ├── scan t1
+  - │         │    ├── columns: id:1!null col:2!null hash:3!null
+  - │         │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+  - │         │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+  - │         │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+  - │         │    ├── cost: 243744.06
+  - │         │    ├── key: (1)
+  - │         │    ├── fd: (1)-->(2,3)
+  - │         │    ├── ordering: +1
+  - │         │    └── limit hint: 3277.92
+  - │         └── filters
+  - │              └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+  + │    ├── scan t1
+  + │    │    ├── columns: id:1!null col:2!null hash:3!null
+  + │    │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+  + │    │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+  + │    │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+  + │    │    ├── cost: 243744.06
+  + │    │    ├── key: (1)
+  + │    │    ├── fd: (1)-->(2,3)
+  + │    │    ├── ordering: +1
+  + │    │    └── limit hint: 3277.92
+  + │    └── filters
+  + │         └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+    └── 500
+================================================================================
+SimplifyLimitOrdering
+  Cost: 243781.88
+================================================================================
+   limit
+    ├── columns: col:2!null hash:3!null id:1!null
+  - ├── internal-ordering: +1
+  + ├── internal-ordering: +1 opt(2)
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+    ├── cost: 243781.879
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1
+    ├── select
+    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+    │    │   histogram(2)=  0        29750
+    │    │                <--- 741184065689976846
+    │    ├── cost: 243776.869
+    │    ├── key: (1)
+    │    ├── fd: ()-->(2), (1)-->(3)
+    │    ├── ordering: +1
+    │    ├── limit hint: 500.00
+    │    ├── scan t1
+    │    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+    │    │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+    │    │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+    │    │    ├── cost: 243744.06
+    │    │    ├── key: (1)
+    │    │    ├── fd: (1)-->(2,3)
+    │    │    ├── ordering: +1
+    │    │    └── limit hint: 3277.92
+    │    └── filters
+    │         └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+    └── 500
+================================================================================
+SimplifyRootOrdering
+  Cost: 243781.88
+================================================================================
+   limit
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── internal-ordering: +1 opt(2)
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+    ├── cost: 243781.879
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+  - ├── ordering: +1
+  + ├── ordering: +1 opt(2) [actual: +1]
+    ├── select
+    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+    │    │   histogram(2)=  0        29750
+    │    │                <--- 741184065689976846
+    │    ├── cost: 243776.869
+    │    ├── key: (1)
+    │    ├── fd: ()-->(2), (1)-->(3)
+  - │    ├── ordering: +1
+  + │    ├── ordering: +1 opt(2) [actual: +1]
+    │    ├── limit hint: 500.00
+    │    ├── scan t1
+    │    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+    │    │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+    │    │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+    │    │    ├── cost: 243744.06
+    │    │    ├── key: (1)
+    │    │    ├── fd: (1)-->(2,3)
+    │    │    ├── ordering: +1
+    │    │    └── limit hint: 3277.92
+    │    └── filters
+    │         └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+    └── 500
+--------------------------------------------------------------------------------
+GenerateIndexScans (no changes)
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+GeneratePartialIndexScans (no changes)
+--------------------------------------------------------------------------------
+================================================================================
+GenerateConstrainedScans
+  Cost: 4169.05
+================================================================================
+   limit
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── internal-ordering: +1 opt(2)
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 243781.879
+  + ├── cost: 4169.05
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1 opt(2) [actual: +1]
+  - ├── select
+  + ├── index-join t1
+    │    ├── columns: id:1!null col:2!null hash:3!null
+    │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+    │    │   histogram(2)=  0        29750
+    │    │                <--- 741184065689976846
+  - │    ├── cost: 243776.869
+  + │    ├── cost: 4164.04
+    │    ├── key: (1)
+    │    ├── fd: ()-->(2), (1)-->(3)
+    │    ├── ordering: +1 opt(2) [actual: +1]
+    │    ├── limit hint: 500.00
+  - │    ├── scan t1
+  - │    │    ├── columns: id:1!null col:2!null hash:3!null
+  - │    │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+  - │    │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+  - │    │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+  - │    │    ├── cost: 243744.06
+  - │    │    ├── key: (1)
+  - │    │    ├── fd: (1)-->(2,3)
+  - │    │    ├── ordering: +1
+  - │    │    └── limit hint: 3277.92
+  - │    └── filters
+  - │         └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+  + │    └── scan t1@col+id_idx
+  + │         ├── columns: id:1!null col:2!null
+  + │         ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  + │         ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  + │         │   histogram(2)=  0        29750
+  + │         │                <--- 741184065689976846
+  + │         ├── cost: 534.02
+  + │         ├── key: (1)
+  + │         ├── fd: ()-->(2)
+  + │         ├── ordering: +1 opt(2) [actual: +1]
+  + │         └── limit hint: 500.00
+    └── 500
+--------------------------------------------------------------------------------
+GenerateZigzagJoins (no changes)
+--------------------------------------------------------------------------------
+================================================================================
+PushLimitIntoIndexJoin
+  Cost: 3564.04
+================================================================================
+  -limit
+  +index-join t1
+    ├── columns: col:2!null hash:3!null id:1!null
+  - ├── internal-ordering: +1 opt(2)
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 4169.05
+  + ├── cost: 3564.04
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1 opt(2) [actual: +1]
+  - ├── index-join t1
+  - │    ├── columns: id:1!null col:2!null hash:3!null
+  - │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  - │    │   histogram(2)=  0        29750
+  - │    │                <--- 741184065689976846
+  - │    ├── cost: 4164.04
+  - │    ├── key: (1)
+  - │    ├── fd: ()-->(2), (1)-->(3)
+  - │    ├── ordering: +1 opt(2) [actual: +1]
+  - │    ├── limit hint: 500.00
+  - │    └── scan t1@col+id_idx
+  - │         ├── columns: id:1!null col:2!null
+  - │         ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  - │         ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  - │         │   histogram(2)=  0        29750
+  - │         │                <--- 741184065689976846
+  - │         ├── cost: 534.02
+  - │         ├── key: (1)
+  - │         ├── fd: ()-->(2)
+  - │         ├── ordering: +1 opt(2) [actual: +1]
+  - │         └── limit hint: 500.00
+  - └── 500
+  + └── limit
+  +      ├── columns: id:1!null col:2!null
+  +      ├── internal-ordering: +1 opt(2)
+  +      ├── cardinality: [0 - 500]
+  +      ├── stats: [rows=500]
+  +      ├── cost: 539.03
+  +      ├── key: (1)
+  +      ├── fd: ()-->(2)
+  +      ├── ordering: +1 opt(2) [actual: +1]
+  +      ├── scan t1@col+id_idx
+  +      │    ├── columns: id:1!null col:2!null
+  +      │    ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  +      │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  +      │    │   histogram(2)=  0        29750
+  +      │    │                <--- 741184065689976846
+  +      │    ├── cost: 534.02
+  +      │    ├── key: (1)
+  +      │    ├── fd: ()-->(2)
+  +      │    ├── ordering: +1 opt(2) [actual: +1]
+  +      │    └── limit hint: 500.00
+  +      └── 500
+--------------------------------------------------------------------------------
+GenerateTopK (higher cost)
+--------------------------------------------------------------------------------
+  -index-join t1
+  +top-k
+    ├── columns: col:2!null hash:3!null id:1!null
+  + ├── internal-ordering: +1 opt(2)
+  + ├── k: 500
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 3564.04
+  + ├── cost: 253048.709
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1 opt(2) [actual: +1]
+  - └── limit
+  -      ├── columns: id:1!null col:2!null
+  -      ├── internal-ordering: +1 opt(2)
+  -      ├── cardinality: [0 - 500]
+  -      ├── stats: [rows=500]
+  -      ├── cost: 539.03
+  + └── select
+  +      ├── columns: id:1!null col:2!null hash:3!null
+  +      ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  +      │   histogram(2)=  0        29750
+  +      │                <--- 741184065689976846
+  +      ├── cost: 246043.33
+         ├── key: (1)
+  -      ├── fd: ()-->(2)
+  -      ├── ordering: +1 opt(2) [actual: +1]
+  -      ├── scan t1@col+id_idx
+  -      │    ├── columns: id:1!null col:2!null
+  -      │    ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  -      │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  -      │    │   histogram(2)=  0        29750
+  -      │    │                <--- 741184065689976846
+  -      │    ├── cost: 534.02
+  +      ├── fd: ()-->(2), (1)-->(3)
+  +      ├── scan t1
+  +      │    ├── columns: id:1!null col:2!null hash:3!null
+  +      │    ├── stats: [rows=229924, distinct(1)=229924, null(1)=0, avgsize(1)=4, distinct(2)=13, null(2)=0, avgsize(2)=4, distinct(3)=22992.4, null(3)=0, avgsize(3)=4]
+  +      │    │   histogram(2)=  0         9334         22         4759         0        62999         275         4759         22         6483         0        29798         0        29750         0        46835
+  +      │    │                <--- 711431153632542727 ---- 732912068535189510 --- 733182606609481738 ----- 734649937190617102 ---- 741128227092201483 --- 741172898827337742 --- 741184065689976846 --- 741190530812346382
+  +      │    ├── cost: 243744.06
+         │    ├── key: (1)
+  -      │    ├── fd: ()-->(2)
+  -      │    ├── ordering: +1 opt(2) [actual: +1]
+  -      │    └── limit hint: 500.00
+  -      └── 500
+  +      │    └── fd: (1)-->(2,3)
+  +      └── filters
+  +           └── col:2 = 741184065689976846 [outer=(2), constraints=(/2: [/741184065689976846 - /741184065689976846]; tight), fd=()-->(2)]
+================================================================================
+PushLimitIntoFilteredScan
+  Cost: 3549.02
+================================================================================
+   index-join t1
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 3564.04
+  + ├── cost: 3549.02
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1 opt(2) [actual: +1]
+  - └── limit
+  + └── scan t1@col+id_idx
+         ├── columns: id:1!null col:2!null
+  -      ├── internal-ordering: +1 opt(2)
+  -      ├── cardinality: [0 - 500]
+  +      ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  +      ├── limit: 500
+         ├── stats: [rows=500]
+  -      ├── cost: 539.03
+  +      ├── cost: 524.01
+         ├── key: (1)
+         ├── fd: ()-->(2)
+  -      ├── ordering: +1 opt(2) [actual: +1]
+  -      ├── scan t1@col+id_idx
+  -      │    ├── columns: id:1!null col:2!null
+  -      │    ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  -      │    ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  -      │    │   histogram(2)=  0        29750
+  -      │    │                <--- 741184065689976846
+  -      │    ├── cost: 534.02
+  -      │    ├── key: (1)
+  -      │    ├── fd: ()-->(2)
+  -      │    ├── ordering: +1 opt(2) [actual: +1]
+  -      │    └── limit hint: 500.00
+  -      └── 500
+  +      └── ordering: +1 opt(2) [actual: +1]
+--------------------------------------------------------------------------------
+GenerateTopK (higher cost)
+--------------------------------------------------------------------------------
+   index-join t1
+    ├── columns: col:2!null hash:3!null id:1!null
+    ├── cardinality: [0 - 500]
+    ├── stats: [rows=500]
+  - ├── cost: 3549.02
+  + ├── cost: 46513.9497
+    ├── key: (1)
+    ├── fd: ()-->(2), (1)-->(3)
+    ├── ordering: +1 opt(2) [actual: +1]
+  - └── scan t1@col+id_idx
+  + └── top-k
+         ├── columns: id:1!null col:2!null
+  -      ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  -      ├── limit: 500
+  +      ├── internal-ordering: +1 opt(2)
+  +      ├── k: 500
+  +      ├── cardinality: [0 - 500]
+         ├── stats: [rows=500]
+  -      ├── cost: 524.01
+  +      ├── cost: 43488.9397
+         ├── key: (1)
+         ├── fd: ()-->(2)
+  -      └── ordering: +1 opt(2) [actual: +1]
+  +      ├── ordering: +1 opt(2) [actual: +1]
+  +      └── scan t1@col+id_idx
+  +           ├── columns: id:1!null col:2!null
+  +           ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+  +           ├── stats: [rows=35071.67, distinct(2)=1, null(2)=0, avgsize(2)=4]
+  +           │   histogram(2)=  0        29750
+  +           │                <--- 741184065689976846
+  +           ├── cost: 36488.5609
+  +           ├── key: (1)
+  +           └── fd: ()-->(2)
+--------------------------------------------------------------------------------
+GeneratePartialOrderTopK (no changes)
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+GeneratePartialOrderTopK (no changes)
+--------------------------------------------------------------------------------
+================================================================================
+Final best expression
+  Cost: 3549.02
+================================================================================
+  index-join t1
+   ├── columns: col:2!null hash:3!null id:1!null
+   ├── cardinality: [0 - 500]
+   ├── stats: [rows=500]
+   ├── cost: 3549.02
+   ├── key: (1)
+   ├── fd: ()-->(2), (1)-->(3)
+   ├── ordering: +1 opt(2) [actual: +1]
+   └── scan t1@col+id_idx
+        ├── columns: id:1!null col:2!null
+        ├── constraint: /2/1: [/741184065689976846 - /741184065689976846]
+        ├── limit: 500
+        ├── stats: [rows=500]
+        ├── cost: 524.01
+        ├── key: (1)
+        ├── fd: ()-->(2)
+        └── ordering: +1 opt(2) [actual: +1]

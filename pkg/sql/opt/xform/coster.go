@@ -735,7 +735,7 @@ func (c *coster) computeScanCost(scan *memo.ScanExpr, required *physical.Require
 	// the scan. See issue #68556.
 	baseCost += c.largeCardinalityCostPenalty(scan.Relational().Cardinality, rowCount)
 
-	if required.LimitHint != 0 {
+	if !isUnfiltered && required.LimitHint != 0 {
 		rowCount = math.Min(rowCount, required.LimitHint)
 	}
 
