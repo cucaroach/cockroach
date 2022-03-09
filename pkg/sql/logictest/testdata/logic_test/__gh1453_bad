@@ -1,0 +1,105 @@
+# Repro for #1466 support issue.  See the histogram value for 741184065689976846 to find the knifes edge
+# between good and bad plans.
+statement ok
+CREATE TABLE t1 (
+	id INT8 NOT NULL DEFAULT unique_rowid() PRIMARY KEY,
+	col INT8 NOT NULL,
+	hash STRING NOT NULL,
+	INDEX "col+id_idx" (col ASC, id ASC)
+);
+ALTER TABLE
+   t1 INJECT STATISTICS '[
+{
+  "columns": [
+      "col"
+  ],
+  "created_at": "2022-03-02 23:35:24.04644",
+  "distinct_count": 13,
+  "histo_buckets": [
+      {
+          "distinct_range": 0,
+          "num_eq": 9334,
+          "num_range": 0,
+          "upper_bound": "711431153632542727"
+      },
+      {
+          "distinct_range": 0.3587517014356067,
+          "num_eq": 4759,
+          "num_range": 22,
+          "upper_bound": "732912068535189510"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 62999,
+          "num_range": 0,
+          "upper_bound": "733182606609481738"
+      },
+      {
+          "distinct_range": 4.383221640237367,
+          "num_eq": 4759,
+          "num_range": 275,
+          "upper_bound": "734649937190617102"
+      },
+      {
+          "distinct_range": 0.2580266583270271,
+          "num_eq": 6483,
+          "num_range": 22,
+          "upper_bound": "741128227092201483"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 29798,
+          "num_range": 0,
+          "upper_bound": "741172898827337742"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq_orig": 64631,
+          "num_eq_good_plan": 29500,
+          "num_eq_bad_plan": 29750,
+          "num_eq": 46000,
+          "num_range": 0,
+          "upper_bound": "741184065689976846"
+      },
+      {
+          "distinct_range": 0,
+          "num_eq": 46835,
+          "num_range": 0,
+          "upper_bound": "741190530812346382"
+      }
+  ],
+  "histo_col_type": "INT8",
+  "name": "__auto__",
+  "null_count": 0,
+  "row_count": 229924
+}
+]'
+
+query T
+EXPLAIN
+SELECT
+  col, hash, id
+FROM
+ t1
+WHERE
+  col = 741184065689976846
+ORDER BY
+  id
+LIMIT
+  500
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 500
+│ count: 500
+│
+└── • filter
+    │ estimated row count: 50,058
+    │ filter: col = 741184065689976846
+    │
+    └── • scan
+          estimated row count: 2,297 - 229,924 (100% of the table; stats collected <hidden> ago)
+          table: t1@t1_pkey
+          spans: FULL SCAN
