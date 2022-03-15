@@ -397,3 +397,15 @@ func BenchmarkBoundAccountGrow(b *testing.B) {
 		_ = a.Grow(ctx, 1)
 	}
 }
+
+func TestGCMemoryMonitor(t *testing.T) {
+	ctx := context.Background()
+	root := NewMonitor("root", GCMemoryResource, nil, nil, -1, math.MaxInt64, nil)
+	root.StartGCRoot(ctx, MakeStandaloneBudget(1024*1024))
+	acc := root.MakeBoundAccount()
+	for {
+		acc.Grow(ctx, 128*8)
+		_ = make([]int64, 128)
+		acc.Shrink(ctx, 128*8)
+	}
+}

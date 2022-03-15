@@ -347,7 +347,7 @@ func newRootSQLMemoryMonitor(opts monitorAndMetricsOptions) monitorAndMetrics {
 	// this monitor will be setting their own noteworthy limits.
 	rootSQLMemoryMonitor := mon.NewMonitor(
 		"root",
-		mon.MemoryResource,
+		mon.GCMemoryResource,
 		rootSQLMetrics.CurBytesCount,
 		rootSQLMetrics.MaxBytesHist,
 		-1,            /* increment: use default increment */
@@ -357,8 +357,8 @@ func newRootSQLMemoryMonitor(opts monitorAndMetricsOptions) monitorAndMetrics {
 	// Set the limit to the memoryPoolSize. Note that this memory monitor also
 	// serves as a parent for a memory monitor that accounts for memory used in
 	// the KV layer at the same node.
-	rootSQLMemoryMonitor.Start(
-		context.Background(), nil, mon.MakeStandaloneBudget(opts.memoryPoolSize))
+	rootSQLMemoryMonitor.StartGCRoot(
+		context.Background(), mon.MakeStandaloneBudget(opts.memoryPoolSize))
 	return monitorAndMetrics{
 		rootSQLMemoryMonitor: rootSQLMemoryMonitor,
 		rootSQLMetrics:       rootSQLMetrics,

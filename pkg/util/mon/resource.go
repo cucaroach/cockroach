@@ -29,6 +29,10 @@ type memoryResource struct{}
 // BytesMonitor to indicate that the monitor will be tracking memory usage.
 var MemoryResource Resource = memoryResource{}
 
+// GCMemoryResource is a utility singleton for monitors of GC memory which have
+// different semantics than MemoryResource.
+var GCMemoryResource Resource = memoryResource{}
+
 // NewBudgetExceededError implements the Resource interface.
 func (m memoryResource) NewBudgetExceededError(
 	requestedBytes int64, reservedBytes int64, budgetBytes int64,

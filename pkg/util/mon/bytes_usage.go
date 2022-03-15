@@ -16,6 +16,8 @@ import (
 	"io"
 	"math"
 	"math/bits"
+	"runtime"
+	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -178,6 +180,9 @@ type BytesMonitor struct {
 		// monitor by its client components.
 		curAllocated int64
 
+		// total allocation since last GC epoch
+		gcEpochAllocated int64
+
 		// maxAllocated tracks the high water mark of allocations. Used for
 		// monitoring.
 		maxAllocated int64
@@ -196,6 +201,8 @@ type BytesMonitor struct {
 		// maxBytesHist is the metric object used to track the high watermark of bytes
 		// allocated by the monitor during its lifetime.
 		maxBytesHist *metric.Histogram
+
+		gcRunning bool
 	}
 
 	// name identifies this monitor in logging messages.
@@ -231,6 +238,8 @@ type BytesMonitor struct {
 	noteworthyUsageBytes int64
 
 	settings *cluster.Settings
+
+	gcCond *sync.Cond
 }
 
 // maxAllocatedButUnusedBlocks determines the maximum difference between the
@@ -245,6 +254,17 @@ var maxAllocatedButUnusedBlocks = envutil.EnvOrDefaultInt("COCKROACH_MAX_ALLOCAT
 // DefaultPoolAllocationSize specifies the unit of allocation used by a monitor
 // to reserve and release bytes to a pool.
 var DefaultPoolAllocationSize = envutil.EnvOrDefaultInt64("COCKROACH_ALLOCATION_CHUNK_SIZE", 10*1024)
+
+var gcEpoch int64
+var once sync.Once
+
+func currentEpoch() int64 {
+	return 0
+}
+
+func lastEpoch() int64 {
+	return 0
+}
 
 // NewMonitor creates a new monitor.
 // Arguments:
@@ -335,6 +355,11 @@ func NewMonitorInheritWithLimit(
 	)
 }
 
+type dummyObject struct {
+	int64
+}
+type gcFinalizer func(interface{})
+
 // Start begins a monitoring region.
 // Arguments:
 // - pool is the upstream monitor that provision allocations exceeding the
@@ -348,6 +373,9 @@ func (mm *BytesMonitor) Start(ctx context.Context, pool *BytesMonitor, reserved 
 	}
 	if mm.mu.curBudget.mon != nil {
 		panic(fmt.Sprintf("%s: already started with pool %s", mm.name, mm.mu.curBudget.mon.name))
+	}
+	if pool != nil && pool.resource != mm.resource {
+		panic("no mixing resource types!")
 	}
 	mm.mu.curAllocated = 0
 	mm.mu.maxAllocated = 0
@@ -363,6 +391,29 @@ func (mm *BytesMonitor) Start(ctx context.Context, pool *BytesMonitor, reserved 
 			humanizeutil.IBytes(mm.reserved.used),
 			poolname)
 	}
+}
+
+// StartGCRoot
+func (mm *BytesMonitor) StartGCRoot(ctx context.Context, reserved BoundAccount) {
+	mm.Start(ctx, nil, reserved)
+	mm.gcCond = sync.NewCond(&mm.mu)
+	/*
+		if mm.resource == GCMemoryResource {
+			once.Do(func() {
+				var f gcFinalizer
+				var ms runtime.MemStats
+				f = func(o interface{}) {
+					gcEpoch++
+					fmt.Printf("finalizer run %d\n", gcEpoch)
+					mm.reserved.used = availableMemory
+					mm.gcCond.Broadcast()
+					obj := dummyObject{}
+					runtime.SetFinalizer(&obj, f)
+				}
+				obj := dummyObject{}
+				runtime.SetFinalizer(&obj, f)
+			})
+		}*/
 }
 
 // NewUnlimitedMonitor creates a new monitor and starts the monitor in
@@ -420,6 +471,11 @@ func (mm *BytesMonitor) doStop(ctx context.Context, check bool) {
 		log.InfofDepth(ctx, 1, "%s, bytes usage max %s",
 			mm.name,
 			humanizeutil.IBytes(mm.mu.maxAllocated))
+	}
+
+	if mm.resource == GCMemoryResource {
+		// do we need to release?
+		mm.mu.curAllocated = 0
 	}
 
 	if check && mm.mu.curAllocated != 0 {
@@ -493,7 +549,8 @@ func (mm *BytesMonitor) Resource() Resource {
 // Shrink, and Resize calls will lock and unlock that mutex making them safe;
 // such methods are identified in their comments.
 type BoundAccount struct {
-	used int64
+	used         int64
+	totalGCCheck int64
 	// reserved is a small buffer to amortize the cost of growing an account. It
 	// decreases as used increases (and vice-versa).
 	reserved int64
@@ -693,6 +750,15 @@ func (b *BoundAccount) Grow(ctx context.Context, x int64) error {
 	}
 	b.reserved -= x
 	b.used += x
+
+	// This has to be in grow to kick on in repeated small Grow/Shrink loops.
+	if b.mon.resource == GCMemoryResource {
+		b.totalGCCheck += x
+		if b.totalGCCheck > 128*1024 {
+			b.mon.gcThrottleCheck(ctx)
+			b.totalGCCheck = 0
+		}
+	}
 	return nil
 }
 
@@ -719,6 +785,7 @@ func (b *BoundAccount) Shrink(ctx context.Context, delta int64) {
 		b.mon.releaseBytes(ctx, b.reserved-b.mon.poolAllocationSize)
 		b.reserved = b.mon.poolAllocationSize
 	}
+
 }
 
 // reserveBytes declares an allocation to this monitor. An error is returned if
@@ -744,12 +811,30 @@ func (mm *BytesMonitor) reserveBytes(ctx context.Context, x int64) error {
 			return err
 		}
 	}
+	mm.mu.gcEpochAllocated += x
 	mm.mu.curAllocated += x
 	if mm.mu.curBytesCount != nil {
 		mm.mu.curBytesCount.Inc(x)
 	}
 	if mm.mu.maxAllocated < mm.mu.curAllocated {
 		mm.mu.maxAllocated = mm.mu.curAllocated
+	}
+
+	if mm.gcCond != nil && mm.mu.gcEpochAllocated > mm.reserved.used/2 {
+		if !mm.mu.gcRunning {
+			mm.mu.gcRunning = true
+			go func() {
+				fmt.Println("Forcing GC due to totalAllocated overage: ", mm.mu.gcEpochAllocated)
+				runtime.GC()
+				fmt.Println("Forcing GC done: ", mm.mu.gcEpochAllocated)
+				mm.mu.Lock()
+				defer mm.mu.Unlock()
+				mm.mu.gcRunning = false
+				mm.mu.gcEpochAllocated = 0
+				mm.gcCond.Broadcast()
+			}()
+		}
+		mm.gcCond.Wait()
 	}
 
 	// Report "large" queries to the log for further investigation.
@@ -857,6 +942,19 @@ func (mm *BytesMonitor) adjustBudget(ctx context.Context) {
 	}
 	if neededBytes <= mm.mu.curBudget.used-margin {
 		mm.mu.curBudget.Shrink(ctx, mm.mu.curBudget.used-neededBytes)
+	}
+}
+
+func (mm *BytesMonitor) gcThrottleCheck(ctx context.Context) {
+	if mm.gcCond != nil {
+		ms := runtime.MemStats{}
+		runtime.ReadMemStats(&ms)
+		// dirty read of used okay?
+		if int64(ms.Alloc) > mm.reserved.used {
+			mm.mu.Lock()
+			defer mm.mu.Unlock()
+			mm.gcCond.Wait()
+		}
 	}
 }
 
