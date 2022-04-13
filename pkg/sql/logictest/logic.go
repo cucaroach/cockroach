@@ -4274,12 +4274,10 @@ func RunSQLLiteLogicTest(t *testing.T, configOverride string) {
 		"/test/index/orderby_nosort/*/*.test",
 		"/test/index/view/*/*.test",
 
-		"/test/select1.test",
-		"/test/select2.test",
-		"/test/select3.test",
-		"/test/select4.test",
+		"/test/*.test",
 
 		// TODO(andyk): No support for join ordering yet, so this takes too long.
+		// FYI: takes 527s on a gceworker with 22.1
 		// "/test/select5.test",
 
 		// TODO(pmattis): Incompatibilities in numeric types.
@@ -4330,8 +4328,9 @@ func runSQLLiteLogicTest(t *testing.T, configOverride string, globs ...string) {
 	// SQLLite logic tests can be very memory and disk intensive, so we give
 	// them larger limits than other logic tests get.
 	serverArgs := TestServerArgs{
-		maxSQLMemoryLimit:    512 << 20, // 512 MiB
-		tempStorageDiskLimit: 512 << 20, // 512 MiB
+		maxSQLMemoryLimit:           512 << 20, // 512 MiB
+		tempStorageDiskLimit:        512 << 20, // 512 MiB
+		DisableWorkmemRandomization: true,
 	}
 	RunLogicTestWithDefaultConfig(t, serverArgs, configOverride, true /* runCCLConfigs */, prefixedGlobs...)
 }
