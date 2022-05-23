@@ -19,7 +19,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
@@ -111,10 +110,12 @@ func MakeInternalExecutor(
 		settings,
 	)
 	monitor.Start(ctx, s.pool, mon.BoundAccount{})
+	sd := NewInternalSessionData(ctx, settings)
 	return InternalExecutor{
-		s:          s,
-		mon:        monitor,
-		memMetrics: memMetrics,
+		s:                s,
+		mon:              monitor,
+		memMetrics:       memMetrics,
+		sessionDataStack: sessiondata.NewStack(sd),
 	}
 }
 
@@ -128,9 +129,7 @@ func MakeInternalExecutorEx(
 	override sessiondata.InternalExecutorOverride,
 ) InternalExecutor {
 	ie := MakeInternalExecutor(ctx, s, memMetrics, settings)
-	sd := ie.newSessionData(ctx)
-	ie.sessionDataStack = sessiondata.NewStack(sd)
-	applyOverrides(override, sd)
+	applyOverrides(override, ie.sessionDataStack.Top())
 	return ie
 }
 
@@ -149,11 +148,14 @@ func (ie *InternalExecutor) SessionData() *sessiondata.SessionData {
 	return ie.sessionDataStack.Top()
 }
 
-func (ie *InternalExecutor) newSessionData(ctx context.Context) *sessiondata.SessionData {
+// NewInternalSessionData returns a session data for use in internal queries
+// that are not run on behalf of a user session, such as those run during the
+// steps of background jobs and schema changes.
+func NewInternalSessionData(ctx context.Context, sv *cluster.Settings) *sessiondata.SessionData {
 	sd := sessiondata.NewSessionData()
 	sds := sessiondata.NewStack(sd)
 	if true { //TODO remove testing switch
-		sdMutIterator := ie.s.makeSessionDataMutatorIterator(sds, sessiondata.SessionDefaults{})
+		sdMutIterator := makeSessionDataMutatorIterator(sv, sds, sessiondata.SessionDefaults{})
 		if err := sdMutIterator.applyOnEachMutatorError(func(m sessionDataMutator) error {
 			return resetSessionVars(ctx, m)
 		}); err != nil {
@@ -162,17 +164,7 @@ func (ie *InternalExecutor) newSessionData(ctx context.Context) *sessiondata.Ses
 		}
 		// Internal streamingCommandResult doesn't handle notices.
 		sd.NoticeDisplaySeverity = 0 //=pgnotice.DisplaySeverityError
-		// TestDistSQLFlowsVirtualTables hangs w/o this, distsql is optin for internal executors for now.
-		sd.DistSQLMode = sessiondatapb.DistSQLOff
 	}
-	return sd
-}
-
-// NewInternalSessionData returns a session data for use in internal queries
-// that are not run on behalf of a user session, such as those run during the
-// steps of background jobs and schema changes.
-func NewInternalSessionData(sv *settings.Values) *sessiondata.SessionData {
-	sd := sessiondata.NewSessionData()
 	sp := sessiondata.DefaultSearchPathForUser(username.NodeUserName())
 	applyOverrides(sessiondata.InternalExecutorOverride{
 		// The database is not supposed to be needed in schema changes, as there
@@ -183,14 +175,11 @@ func NewInternalSessionData(sv *settings.Values) *sessiondata.SessionData {
 		// And in fact it is used by `current_schemas()`, which, although is a pure
 		// function, takes arguments which might be impure (so it can't always be
 		// pre-evaluated).
-		Database:    "",
-		User:        username.NodeUserName(),
-		DistSQLMode: sessiondatapb.DistSQLExecMode(DistSQLClusterExecMode.Get(sv)),
-		SearchPath:  &sp,
+		Database:   "",
+		User:       username.NodeUserName(),
+		SearchPath: &sp,
 	}, sd)
 	sd.Internal = true
-	sd.VectorizeMode = sessiondatapb.VectorizeExecMode(VectorizeClusterMode.Get(sv))
-
 	return sd
 }
 
@@ -240,7 +229,7 @@ func (ie *InternalExecutor) initConnEx(
 	applicationStats := ie.s.sqlStats.GetApplicationStats(appStatsBucketName)
 
 	sds := sessiondata.NewStack(sd)
-	sdMutIterator := ie.s.makeSessionDataMutatorIterator(sds, nil /* sessionDefaults */)
+	sdMutIterator := makeSessionDataMutatorIterator(ie.s.cfg.Settings, sds, nil /* sessionDefaults */)
 	var ex *connExecutor
 	if txn == nil {
 		ex = ie.s.newConnExecutor(
@@ -707,7 +696,7 @@ func (ie *InternalExecutor) execInternal(
 	if ie.sessionDataStack != nil {
 		sd = ie.sessionDataStack.Top().Clone()
 	} else {
-		sd = ie.newSessionData(ctx)
+		sd = NewInternalSessionData(ctx, ie.s.cfg.Settings)
 	}
 	applyOverrides(sessionDataOverride, sd)
 	sd.Internal = true

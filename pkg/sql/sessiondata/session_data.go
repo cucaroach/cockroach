@@ -327,13 +327,11 @@ type SessionArgs struct {
 	SessionRevivalToken []byte
 }
 
-var NoArgs = SessionArgs{}
-
 // NewSessionData a SessionData that can be passed to newConnExecutor. This
 // is a minimally populated session that has mostly go defaults and doesn't
 // have sessionVar defaults.
 func NewSessionData() *SessionData {
-	return NewSessionDataEx(NoArgs)
+	return NewSessionDataEx(SessionArgs{})
 }
 
 // NewSessionDataEx creates a SessionData that can be passed to

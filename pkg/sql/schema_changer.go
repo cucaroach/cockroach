@@ -1716,7 +1716,7 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 		metaDataUpdater := sc.execCfg.DescMetadaUpdaterFactory.NewMetadataUpdater(
 			ctx,
 			txn,
-			NewInternalSessionData(&sc.settings.SV))
+			NewInternalSessionData(ctx, sc.settings))
 		for _, comment := range commentsToDelete {
 			err := metaDataUpdater.DeleteDescriptorComment(
 				comment.id,
@@ -2423,7 +2423,7 @@ func createSchemaChangeEvalCtx(
 	ctx context.Context, execCfg *ExecutorConfig, ts hlc.Timestamp, descriptors *descs.Collection,
 ) extendedEvalContext {
 
-	sd := NewInternalSessionData(execCfg.SV())
+	sd := NewInternalSessionData(ctx, execCfg.Settings)
 
 	evalCtx := extendedEvalContext{
 		// Make a session tracing object on-the-fly. This is OK

@@ -544,6 +544,7 @@ func TestDistSQLFlowsVirtualTables(t *testing.T) {
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs:      params,
 	})
+
 	defer tc.Stopper().Stop(context.Background())
 
 	// Create a table with 3 rows, split them into 3 ranges with each node

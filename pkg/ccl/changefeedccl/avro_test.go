@@ -405,7 +405,7 @@ func TestAvroSchema(t *testing.T) {
 
 			for _, encDatums := range rows {
 				row := cdcevent.TestingMakeEventRow(tableDesc, encDatums, false)
-				evalCtx := &eval.Context{}
+				evalCtx := eval.NewTestingEvalContext(nil)
 				serialized, err := origSchema.textualFromRow(row)
 				require.NoError(t, err)
 				roundtripped, err := roundtrippedSchema.rowFromTextual(serialized)

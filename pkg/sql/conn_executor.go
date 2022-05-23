@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -657,7 +658,7 @@ func (s *Server) SetupConn(
 	sds := sessiondata.NewStack(sd)
 	// Set the SessionData from args.SessionDefaults. This also validates the
 	// respective values.
-	sdMutIterator := s.makeSessionDataMutatorIterator(sds, args.SessionDefaults)
+	sdMutIterator := makeSessionDataMutatorIterator(s.GetExecutorConfig().Settings, sds, args.SessionDefaults)
 	sdMutIterator.onDefaultIntSizeChange = onDefaultIntSizeChange
 	if err := sdMutIterator.applyOnEachMutatorError(func(m sessionDataMutator) error {
 		return resetSessionVars(ctx, m)
@@ -757,14 +758,14 @@ func (s *Server) GetLocalIndexStatistics() *idxusage.LocalIndexUsageStats {
 	return s.indexUsageStats
 }
 
-func (s *Server) makeSessionDataMutatorIterator(
-	sds *sessiondata.Stack, defaults sessiondata.SessionDefaults,
+func makeSessionDataMutatorIterator(
+	settings *cluster.Settings, sds *sessiondata.Stack, defaults sessiondata.SessionDefaults,
 ) *sessionDataMutatorIterator {
 	return &sessionDataMutatorIterator{
 		sds: sds,
 		sessionDataMutatorBase: sessionDataMutatorBase{
 			defaults: defaults,
-			settings: s.cfg.Settings,
+			settings: settings,
 		},
 		sessionDataMutatorCallbacks: sessionDataMutatorCallbacks{},
 	}

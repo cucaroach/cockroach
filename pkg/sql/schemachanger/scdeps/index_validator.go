@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
@@ -46,9 +45,9 @@ type ValidateInvertedIndexesFn func(
 	execOverride sessiondata.InternalExecutorOverride,
 ) error
 
-// NewFakeSessionDataFn callback function used to create session data
+// NewInternalSessionDataFn callback function used to create session data
 // for the internal executor.
-type NewFakeSessionDataFn func(sv *settings.Values) *sessiondata.SessionData
+type NewInternalSessionDataFn func(ctx context.Context, sv *cluster.Settings) *sessiondata.SessionData
 
 type indexValidator struct {
 	db                      *kv.DB
@@ -57,7 +56,7 @@ type indexValidator struct {
 	ieFactory               sqlutil.SessionBoundInternalExecutorFactory
 	validateForwardIndexes  ValidateForwardIndexesFn
 	validateInvertedIndexes ValidateInvertedIndexesFn
-	newFakeSessionData      NewFakeSessionDataFn
+	newInternalSessionData  NewInternalSessionDataFn
 }
 
 // ValidateForwardIndexes checks that the indexes have entries for all the rows.
@@ -74,7 +73,7 @@ func (iv indexValidator) ValidateForwardIndexes(
 		if err != nil {
 			return err
 		}
-		return fn(ctx, validationTxn, iv.ieFactory(ctx, iv.newFakeSessionData(&iv.settings.SV)))
+		return fn(ctx, validationTxn, iv.ieFactory(ctx, iv.newInternalSessionData(ctx, iv.settings)))
 	}
 	const withFirstMutationPublic = true
 	const gatherAllInvalid = false
@@ -95,7 +94,7 @@ func (iv indexValidator) ValidateInvertedIndexes(
 		if err != nil {
 			return err
 		}
-		return fn(ctx, validationTxn, iv.ieFactory(ctx, iv.newFakeSessionData(&iv.settings.SV)))
+		return fn(ctx, validationTxn, iv.ieFactory(ctx, iv.newInternalSessionData(ctx, iv.settings)))
 	}
 	const withFirstMutationPublic = true
 	const gatherAllInvalid = false
@@ -111,7 +110,7 @@ func NewIndexValidator(
 	ieFactory sqlutil.SessionBoundInternalExecutorFactory,
 	validateForwardIndexes ValidateForwardIndexesFn,
 	validateInvertedIndexes ValidateInvertedIndexesFn,
-	newFakeSessionData NewFakeSessionDataFn,
+	newInternalSessionData NewInternalSessionDataFn,
 ) scexec.IndexValidator {
 	return indexValidator{
 		db:                      db,
@@ -120,6 +119,6 @@ func NewIndexValidator(
 		ieFactory:               ieFactory,
 		validateForwardIndexes:  validateForwardIndexes,
 		validateInvertedIndexes: validateInvertedIndexes,
-		newFakeSessionData:      newFakeSessionData,
+		newInternalSessionData:  newInternalSessionData,
 	}
 }
