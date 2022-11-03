@@ -89,8 +89,8 @@ var maxRowSizeErr = settings.RegisterByteSizeSetting(
 	},
 ).WithPublic()
 
-// rowHelper has the common methods for table row manipulations.
-type rowHelper struct {
+// RowHelper has the common methods for table row manipulations.
+type RowHelper struct {
 	Codec keys.SQLCodec
 
 	TableDesc catalog.TableDescriptor
@@ -103,7 +103,7 @@ type rowHelper struct {
 	secIndexValDirs  [][]encoding.Direction
 
 	// Computed and cached.
-	primaryIndexKeyPrefix []byte
+	PrimaryIndexKeyPrefix []byte
 	primaryIndexKeyCols   catalog.TableColSet
 	primaryIndexValueCols catalog.TableColSet
 	sortedColumnFamilies  map[descpb.FamilyID][]descpb.ColumnID
@@ -114,15 +114,15 @@ type rowHelper struct {
 	metrics                      *rowinfra.Metrics
 }
 
-func newRowHelper(
+func NewRowHelper(
 	codec keys.SQLCodec,
 	desc catalog.TableDescriptor,
 	indexes []catalog.Index,
 	sv *settings.Values,
 	internal bool,
 	metrics *rowinfra.Metrics,
-) rowHelper {
-	rh := rowHelper{
+) RowHelper {
+	rh := RowHelper{
 		Codec:     codec,
 		TableDesc: desc,
 		Indexes:   indexes,
@@ -149,7 +149,7 @@ func newRowHelper(
 // secondaryIndexEntries are only valid until the next call to encodeIndexes or
 // encodeSecondaryIndexes. includeEmpty details whether the results should
 // include empty secondary index k/v pairs.
-func (rh *rowHelper) encodeIndexes(
+func (rh *RowHelper) encodeIndexes(
 	colIDtoRowIndex catalog.TableColMap,
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
@@ -171,17 +171,17 @@ func (rh *rowHelper) encodeIndexes(
 }
 
 // encodePrimaryIndex encodes the primary index key.
-func (rh *rowHelper) encodePrimaryIndex(
+func (rh *RowHelper) encodePrimaryIndex(
 	colIDtoRowIndex catalog.TableColMap, values []tree.Datum,
 ) (primaryIndexKey []byte, err error) {
-	if rh.primaryIndexKeyPrefix == nil {
-		rh.primaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(
+	if rh.PrimaryIndexKeyPrefix == nil {
+		rh.PrimaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(
 			rh.Codec, rh.TableDesc.GetID(), rh.TableDesc.GetPrimaryIndexID(),
 		)
 	}
 	idx := rh.TableDesc.GetPrimaryIndex()
 	primaryIndexKey, containsNull, err := rowenc.EncodeIndexKey(
-		rh.TableDesc, idx, colIDtoRowIndex, values, rh.primaryIndexKeyPrefix,
+		rh.TableDesc, idx, colIDtoRowIndex, values, rh.PrimaryIndexKeyPrefix,
 	)
 	if containsNull {
 		return nil, rowenc.MakeNullPKError(rh.TableDesc, idx, colIDtoRowIndex, values)
@@ -200,7 +200,7 @@ func (rh *rowHelper) encodePrimaryIndex(
 //
 // includeEmpty details whether the results should include empty secondary index
 // k/v pairs.
-func (rh *rowHelper) encodeSecondaryIndexes(
+func (rh *RowHelper) encodeSecondaryIndexes(
 	colIDtoRowIndex catalog.TableColMap,
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
@@ -229,11 +229,11 @@ func (rh *rowHelper) encodeSecondaryIndexes(
 	return rh.indexEntries, nil
 }
 
-// skipColumnNotInPrimaryIndexValue returns true if the value at column colID
+// SkipColumnNotInPrimaryIndexValue returns true if the value at column colID
 // does not need to be encoded, either because it is already part of the primary
 // key, or because it is not part of the primary index altogether. Composite
 // datums are considered too, so a composite datum in a PK will return false.
-func (rh *rowHelper) skipColumnNotInPrimaryIndexValue(
+func (rh *RowHelper) SkipColumnNotInPrimaryIndexValue(
 	colID descpb.ColumnID, value tree.Datum,
 ) (bool, error) {
 	if rh.primaryIndexKeyCols.Empty() {
@@ -253,7 +253,7 @@ func (rh *rowHelper) skipColumnNotInPrimaryIndexValue(
 	return true, nil
 }
 
-func (rh *rowHelper) sortedColumnFamily(famID descpb.FamilyID) ([]descpb.ColumnID, bool) {
+func (rh *RowHelper) SortedColumnFamily(famID descpb.FamilyID) ([]descpb.ColumnID, bool) {
 	if rh.sortedColumnFamilies == nil {
 		rh.sortedColumnFamilies = make(map[descpb.FamilyID][]descpb.ColumnID, rh.TableDesc.NumFamilies())
 
@@ -268,11 +268,12 @@ func (rh *rowHelper) sortedColumnFamily(famID descpb.FamilyID) ([]descpb.ColumnI
 	return colIDs, ok
 }
 
-// checkRowSize compares the size of a primary key column family against the
+// CheckRowSize compares the size of a primary key column family against the
 // max_row_size limits.
-func (rh *rowHelper) checkRowSize(
+func (rh *RowHelper) CheckRowSize(
 	ctx context.Context, key *roachpb.Key, value *roachpb.Value, family descpb.FamilyID,
 ) error {
+	// TODO: should we make an inlinable fastpath func?
 	size := uint32(len(*key)) + uint32(len(value.RawBytes))
 	shouldLog := rh.maxRowSizeLog != 0 && size > rh.maxRowSizeLog
 	shouldErr := rh.maxRowSizeErr != 0 && size > rh.maxRowSizeErr
@@ -316,7 +317,7 @@ var deleteEncoding protoutil.Message = &rowencpb.IndexValueWrapper{
 	Deleted: true,
 }
 
-func (rh *rowHelper) deleteIndexEntry(
+func (rh *RowHelper) deleteIndexEntry(
 	ctx context.Context,
 	batch *kv.Batch,
 	index catalog.Index,

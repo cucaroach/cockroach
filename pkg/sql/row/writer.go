@@ -89,7 +89,7 @@ func ColMapping(fromCols, toCols []catalog.Column) []int {
 func prepareInsertOrUpdateBatch(
 	ctx context.Context,
 	batch putter,
-	helper *rowHelper,
+	helper *RowHelper,
 	primaryIndexKey []byte,
 	fetchedCols []catalog.Column,
 	values []tree.Datum,
@@ -156,7 +156,7 @@ func prepareInsertOrUpdateBatch(
 				// We only output non-NULL values. Non-existent column keys are
 				// considered NULL during scanning and the row sentinel ensures we know
 				// the row exists.
-				if err := helper.checkRowSize(ctx, kvKey, &marshaled, family.ID); err != nil {
+				if err := helper.CheckRowSize(ctx, kvKey, &marshaled, family.ID); err != nil {
 					return nil, err
 				}
 				putFn(ctx, batch, kvKey, &marshaled, traceKV)
@@ -168,7 +168,7 @@ func prepareInsertOrUpdateBatch(
 		rawValueBuf = rawValueBuf[:0]
 
 		var lastColID descpb.ColumnID
-		familySortedColumnIDs, ok := helper.sortedColumnFamily(family.ID)
+		familySortedColumnIDs, ok := helper.SortedColumnFamily(family.ID)
 		if !ok {
 			return nil, errors.AssertionFailedf("invalid family sorted column id map")
 		}
@@ -179,7 +179,7 @@ func prepareInsertOrUpdateBatch(
 				continue
 			}
 
-			if skip, err := helper.skipColumnNotInPrimaryIndexValue(colID, values[idx]); err != nil {
+			if skip, err := helper.SkipColumnNotInPrimaryIndexValue(colID, values[idx]); err != nil {
 				return nil, err
 			} else if skip {
 				continue
@@ -209,7 +209,7 @@ func prepareInsertOrUpdateBatch(
 			// a deep copy so rawValueBuf can be re-used by other calls to the
 			// function.
 			kvValue.SetTuple(rawValueBuf)
-			if err := helper.checkRowSize(ctx, kvKey, kvValue, family.ID); err != nil {
+			if err := helper.CheckRowSize(ctx, kvKey, kvValue, family.ID); err != nil {
 				return nil, err
 			}
 			putFn(ctx, batch, kvKey, kvValue, traceKV)

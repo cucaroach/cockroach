@@ -422,6 +422,64 @@ func (b *Batch) Put(key, value interface{}) {
 	b.put(key, value, false)
 }
 
+func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.PutRequest, len(keys))
+	var v roachpb.Value
+	for i, key := range keys {
+		k, err := marshalKey(key)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		v.SetBytes(values[i])
+		v, err := marshalValue(&v)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		put := &puts[i]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		put.Value = v
+		reqs[i] = &puts[i]
+		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+	}
+	b.appendReqs(reqs...)
+	b.initResult(len(reqs), len(reqs), notRaw, nil)
+}
+
+func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.InitPutRequest, len(keys))
+	var v roachpb.Value
+	for i, key := range keys {
+		k, err := marshalKey(key)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		v.SetBytes(values[i])
+		v, err := marshalValue(&v)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		v.InitChecksum(key)
+		put := &puts[i]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		put.Value = v
+		put.FailOnTombstones = failOnTombstones
+		reqs[i] = &puts[i]
+		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+	}
+	b.appendReqs(reqs...)
+	b.initResult(len(reqs), len(reqs), notRaw, nil)
+}
+
 // PutInline sets the value for a key, but does not maintain
 // multi-version values. The most recent value is always overwritten.
 // Inline values cannot be mutated transactionally and should be used
@@ -503,6 +561,34 @@ func (b *Batch) cputInternal(
 	}
 	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	b.initResult(1, 1, notRaw, nil)
+}
+
+func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.ConditionalPutRequest, len(keys))
+	var v roachpb.Value
+	for i, key := range keys {
+		k, err := marshalKey(key)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		v.SetTuple(values[i])
+		v, err := marshalValue(&v)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		put := &puts[i]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		put.Value = v
+		reqs[i] = &puts[i]
+		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+	}
+	b.appendReqs(reqs...)
+	b.initResult(len(reqs), len(reqs), notRaw, nil)
 }
 
 // InitPut sets the first value for a key to value. An ConditionFailedError is

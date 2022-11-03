@@ -13,9 +13,15 @@ package tree
 import (
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/cockroachdb/apd/v3"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/json"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -132,4 +138,174 @@ func FormatBitArrayToType(d *DBitArray, t *types.T) *DBitArray {
 		a = a.ToWidth(uint(t.Width()))
 	}
 	return &DBitArray{a}
+}
+
+// ValueHandler is an interface to allow colvec types to remain as machine types
+// and create everything else as Datums.
+type ValueHandler interface {
+	// Get returns the raw underlying slice
+	Bools() []bool
+	Ints() []int64
+	Datums() Datums
+	Floats() []float64
+	Strings() []string
+	Decimals() []apd.Decimal
+
+	Date(d pgdate.Date)
+	Datum(d Datum)
+	Bool(b bool)
+	Bytes(b []byte)
+	Decimal() *apd.Decimal
+	Float(f float64)
+	Int(i int64)
+	Duration(d duration.Duration)
+	JSON(j json.JSON)
+	String(s string)
+	TimestampTZ(t time.Time)
+	Reset()
+}
+
+func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh ValueHandler, ph *pgdate.ParseHelper) (err error) {
+	var d Datum
+	switch t.Family() {
+	case types.ArrayFamily:
+		d, _, err = ParseDArrayFromString(ctx, s, t.ArrayContents())
+	case types.BitFamily:
+		var r *DBitArray
+		r, err = ParseDBitArray(s)
+		if err != nil {
+			return err
+		}
+		d = FormatBitArrayToType(r, t)
+	case types.BoolFamily:
+		var b bool
+		b, err = ParseBool(strings.TrimSpace(s))
+		if err == nil {
+			vh.Bool(b)
+			return nil
+		}
+	case types.BytesFamily:
+		var res []byte
+		res, err = lex.DecodeRawBytesToByteArrayAuto([]byte(s))
+		if err != nil {
+			return MakeParseError(s, types.Bytes, err)
+		}
+		vh.Bytes(res)
+		return nil
+	case types.DateFamily:
+		now := relativeParseTime(ctx)
+		t, _, err := pgdate.ParseDateEx(now, dateStyle(ctx), s, ph)
+		if err == nil {
+			vh.Date(t)
+			return nil
+		}
+	case types.DecimalFamily:
+		//d, err = ParseDDecimal(strings.TrimSpace(s))
+		dec := vh.Decimal()
+		var res apd.Condition
+		_, res, err = ExactCtx.SetString(dec, s)
+		if res != 0 || err != nil {
+			return MakeParseError(s, types.Decimal, err)
+		}
+		switch dec.Form {
+		case apd.NaNSignaling:
+			dec.Form = apd.NaN
+			dec.Negative = false
+		case apd.NaN:
+			dec.Negative = false
+		case apd.Finite:
+			if dec.IsZero() && dec.Negative {
+				dec.Negative = false
+			}
+		}
+		return nil
+	case types.FloatFamily:
+		//d, err = ParseDFloat(strings.TrimSpace(s))
+		var f float64
+		f, err = strconv.ParseFloat(s, 64)
+		if err != nil {
+			return MakeParseError(s, types.Float, err)
+		}
+		vh.Float(f)
+		return nil
+	case types.INetFamily:
+		d, err = ParseDIPAddrFromINetString(s)
+	case types.IntFamily:
+		//d, err = ParseDInt(strings.TrimSpace(s))
+		var i int64
+		i, err = strconv.ParseInt(s, 0, 64)
+		if err != nil {
+			return MakeParseError(s, types.Int, err)
+		}
+		vh.Int(i)
+		return nil
+	case types.IntervalFamily:
+		itm, typErr := t.IntervalTypeMetadata()
+		if typErr != nil {
+			return typErr
+		}
+		d, err = ParseDIntervalWithTypeMetadata(intervalStyle(ctx), s, itm)
+	case types.Box2DFamily:
+		d, err = ParseDBox2D(s)
+	case types.GeographyFamily:
+		d, err = ParseDGeography(s)
+	case types.GeometryFamily:
+		d, err = ParseDGeometry(s)
+	case types.JsonFamily:
+		//TODO
+		d, err = ParseDJSON(s)
+	case types.OidFamily:
+		if t.Oid() != oid.T_oid && s == ZeroOidValue {
+			d = WrapAsZeroOid(t)
+		} else {
+			d, err = ParseDOidAsInt(s)
+		}
+	case types.StringFamily:
+		// If the string type specifies a limit we truncate to that limit:
+		//   'hello'::CHAR(2) -> 'he'
+		// This is true of all the string type variants.
+		if t.Width() > 0 {
+			s = util.TruncateString(s, int(t.Width()))
+		}
+		vh.String(s)
+		return nil
+	case types.TimeFamily:
+		d, _, err = ParseDTime(ctx, s, TimeFamilyPrecisionToRoundDuration(t.Precision()))
+	case types.TimeTZFamily:
+		d, _, err = ParseDTimeTZ(ctx, s, TimeFamilyPrecisionToRoundDuration(t.Precision()))
+	case types.TimestampFamily:
+		d, _, err = ParseDTimestamp(ctx, s, TimeFamilyPrecisionToRoundDuration(t.Precision()))
+	case types.TimestampTZFamily:
+		//d, _, err = ParseDTimestampTZ(ctx, s,
+		//TimeFamilyPrecisionToRoundDuration(t.Precision()))
+		now := relativeParseTime(ctx)
+		ts, _, err := pgdate.ParseTimestamp(now, dateStyle(ctx), s)
+		if err != nil {
+			return err
+		}
+		// Always normalize time to the current location.
+		ret := ts.Round(TimeFamilyPrecisionToRoundDuration(t.Precision()))
+		if ret.After(MaxSupportedTime) || ret.Before(MinSupportedTime) {
+			return NewTimestampExceedsBoundsError(ret)
+		}
+		vh.TimestampTZ(ts)
+		return nil
+	case types.UuidFamily:
+		d, err = ParseDUuidFromString(s)
+	case types.EnumFamily:
+		d, err = MakeDEnumFromLogicalRepresentation(t, s)
+	case types.TupleFamily:
+		d, _, err = ParseDTupleFromString(ctx, s, t)
+	case types.VoidFamily:
+		d = DVoidDatum
+	default:
+		return errors.AssertionFailedf("unknown type %s (%T)", t, t)
+	}
+	if err != nil {
+		return err
+	}
+	d, err = AdjustValueToType(t, d)
+	//TODO: this fallthrough to datum is bogus, refactor
+	vh.Datum(d)
+	return err
 }

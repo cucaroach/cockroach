@@ -49,6 +49,9 @@ CREATE TABLE  lineitem (
 	l_comment       VARCHAR(44) NOT NULL,
 	l_dummy         CHAR(1),
 	PRIMARY KEY     (l_orderkey, l_linenumber));
+`
+
+var lineitemIndexes string = `
 CREATE INDEX  l_ok ON lineitem    (l_orderkey);
 CREATE INDEX  l_pk ON lineitem    (l_partkey);
 CREATE INDEX  l_sk ON lineitem    (l_suppkey);
@@ -116,9 +119,10 @@ func runTest(ctx context.Context, t test.Test, c cluster.Cluster, pg string) {
 
 func runCopyFromPG(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
 	initTest(ctx, t, c, sf)
-	c.Run(ctx, c.Node(1), "sudo -i -u postgres psql -c 'DROP TABLE IF EXISTS lineitem'")
-	c.Run(ctx, c.Node(1), fmt.Sprintf("sudo -i -u postgres psql -c '%s'", lineitemSchema))
-	runTest(ctx, t, c, "sudo -i -u postgres psql")
+	c.Run(ctx, c.Node(1), "psql -d postgres -c 'DROP TABLE IF EXISTS lineitem'")
+	c.Run(ctx, c.Node(1), fmt.Sprintf("psql -d postgres psql -c '%s'", lineitemSchema))
+	c.Run(ctx, c.Node(1), fmt.Sprintf("psql -d postgres psql -c '%s'", lineitemIndexes))
+	runTest(ctx, t, c, "psql -d postgres")
 }
 
 func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int, atomic bool) {

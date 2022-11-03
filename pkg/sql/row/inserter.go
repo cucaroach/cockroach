@@ -27,7 +27,7 @@ import (
 
 // Inserter abstracts the key/value operations for inserting table rows.
 type Inserter struct {
-	Helper                rowHelper
+	Helper                RowHelper
 	InsertCols            []catalog.Column
 	InsertColIDtoRowIndex catalog.TableColMap
 
@@ -53,7 +53,7 @@ func MakeInserter(
 	metrics *rowinfra.Metrics,
 ) (Inserter, error) {
 	ri := Inserter{
-		Helper: newRowHelper(
+		Helper: NewRowHelper(
 			codec, tableDesc, tableDesc.WritableNonPrimaryIndexes(), sv, internal, metrics,
 		),
 
