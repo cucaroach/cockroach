@@ -37,12 +37,23 @@ func (v *vecHandler) Reset() {
 	v.row = 0
 }
 
+// Reset is used to re-use a batch handler across batches.
+func (v *vecHandler) Len() int {
+	return v.row
+}
+
 // Decimal implements tree.ValueHandler interface. It returns a pointer into the
 // vec to avoid copying.
 func (v *vecHandler) Decimal() *apd.Decimal {
 	d := &v.col.Decimal()[v.row]
 	v.row++
 	return d
+}
+
+// Null implements tree.ValueHandler interface.
+func (v *vecHandler) Null() {
+	v.col.Nulls().SetNull(v.row)
+	v.row++
 }
 
 // String is part of the tree.ValueHandler interface.

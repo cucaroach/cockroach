@@ -443,11 +443,9 @@ func mustWrapValuesNode(planCtx *PlanningCtx, specifiedInQuery bool) bool {
 	// If the plan is local, we also wrap the valuesNode to avoid pointless
 	// serialization of the values, and also to avoid situations in which
 	// expressions within the valuesNode were not distributable in the first
-	// place.
-	if !specifiedInQuery || planCtx.isLocal {
-		return true
-	}
-	return false
+	// place. Unless the plan is a vector insert where we are inserting a preformed
+	// coldata.Batch.
+	return !specifiedInQuery || (planCtx.isLocal && !planCtx.isVectorInsert)
 }
 
 // checkSupportForPlanNode returns a distRecommendation (as described above) or
@@ -803,6 +801,9 @@ type PlanningCtx struct {
 	// release the resources that are acquired during the physical planning and
 	// are being held onto throughout the whole flow lifecycle.
 	onFlowCleanup []func()
+
+	// This is true if plan is a simple insert that can be vectorized.
+	isVectorInsert bool
 }
 
 var _ physicalplan.ExprContext = &PlanningCtx{}
@@ -3305,6 +3306,9 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 	case *indexJoinNode:
 		plan, err = dsp.createPlanForIndexJoin(ctx, planCtx, n)
 
+	case *insertNode:
+		plan, err = dsp.createPlanForInsert(ctx, planCtx, n)
+
 	case *invertedFilterNode:
 		plan, err = dsp.createPlanForInvertedFilter(ctx, planCtx, n)
 
@@ -3346,6 +3350,23 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 			return nil, err
 		}
 
+	case *rowCountNode:
+		if in, ok := n.source.(*insertNode); ok {
+			if r, ok := in.source.(*renderNode); ok {
+				if v, ok := r.source.plan.(*valuesNode); ok {
+					if v.coldataBatch != nil {
+						planCtx.isVectorInsert = true
+					}
+				}
+			}
+		}
+
+		if planCtx.isVectorInsert {
+			plan, err = dsp.createPlanForRowCount(ctx, planCtx, n)
+		} else {
+			plan, err = dsp.wrapPlan(ctx, planCtx, n, false /* allowPartialDistribution */)
+		}
+
 	case *scanNode:
 		plan, err = dsp.createTableReaders(ctx, planCtx, n)
 
@@ -3384,7 +3405,14 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 			if err != nil {
 				return nil, err
 			}
-			plan, err = dsp.createValuesPlan(planCtx, spec, colTypes)
+			var idx physicalplan.ProcessorIdx
+			plan, idx, err = dsp.createValuesPlan(planCtx, spec, colTypes)
+			if n.coldataBatch != nil {
+				if plan.LocalVectorSources == nil {
+					plan.LocalVectorSources = make(map[int32]any)
+				}
+				plan.LocalVectorSources[int32(idx)] = n.coldataBatch
+			}
 		}
 
 	case *windowNode:
@@ -3567,7 +3595,7 @@ func (dsp *DistSQLPlanner) createValuesSpec(
 // located on the gateway node.
 func (dsp *DistSQLPlanner) createValuesPlan(
 	planCtx *PlanningCtx, spec *execinfrapb.ValuesCoreSpec, resultTypes []*types.T,
-) (*PhysicalPlan, error) {
+) (*PhysicalPlan, physicalplan.ProcessorIdx, error) {
 	p := planCtx.NewPhysicalPlan()
 
 	pIdx := p.AddProcessor(physicalplan.Processor{
@@ -3583,7 +3611,7 @@ func (dsp *DistSQLPlanner) createValuesPlan(
 	p.Distribution = physicalplan.LocalPlan
 	p.PlanToStreamColMap = identityMapInPlace(make([]int, len(resultTypes)))
 
-	return p, nil
+	return p, pIdx, nil
 }
 
 // createValuesSpecFromTuples creates a ValuesCoreSpec from the results of
@@ -3628,7 +3656,8 @@ func (dsp *DistSQLPlanner) createPlanForUnary(
 	}
 
 	spec := dsp.createValuesSpec(planCtx, types, 1 /* numRows */, nil /* rawBytes */)
-	return dsp.createValuesPlan(planCtx, spec, types)
+	plan, _, err := dsp.createValuesPlan(planCtx, spec, types)
+	return plan, err
 }
 
 func (dsp *DistSQLPlanner) createPlanForZero(
@@ -3640,7 +3669,8 @@ func (dsp *DistSQLPlanner) createPlanForZero(
 	}
 
 	spec := dsp.createValuesSpec(planCtx, types, 0 /* numRows */, nil /* rawBytes */)
-	return dsp.createValuesPlan(planCtx, spec, types)
+	plan, _, err := dsp.createValuesPlan(planCtx, spec, types)
+	return plan, err
 }
 
 func (dsp *DistSQLPlanner) createDistinctSpec(
@@ -4531,7 +4561,59 @@ func (dsp *DistSQLPlanner) finalizePlanWithRowCount(
 	})
 
 	// Assign processor IDs.
-	for i := range plan.Processors {
+	for i, p := range plan.Processors {
 		plan.Processors[i].Spec.ProcessorID = int32(i)
+		// Double check that our reliance on ProcessorID == index is good
+		if _, ok := plan.LocalVectorSources[int32(i)]; ok {
+			// Ensure processor is a values spec
+			if p.Spec.Core.Values == nil {
+				panic(errors.AssertionFailedf("expected processor to be Values"))
+			}
+		}
 	}
+}
+
+func (dsp *DistSQLPlanner) createPlanForRowCount(
+	ctx context.Context, planCtx *PlanningCtx, n *rowCountNode,
+) (*PhysicalPlan, error) {
+	plan, err := dsp.createPhysPlanForPlanNode(ctx, planCtx, n.source)
+	plan.PlanToStreamColMap = identityMap(nil, 1)
+	fn := newAggregateFuncHolder(
+		execinfrapb.AggregatorSpec_Func_name[int32(execinfrapb.AggregatorSpec_COUNT_ROWS)],
+		[]int{0},
+		nil,   /* arguments */
+		false, /* isDistinct */
+	)
+	gn := groupNode{
+		columns:   []colinfo.ResultColumn{{Name: "rowCount", Typ: types.Int}},
+		plan:      n,
+		groupCols: []int{0},
+		isScalar:  true,
+		funcs:     []*aggregateFuncHolder{fn},
+	}
+	dsp.addAggregators(ctx, planCtx, plan, &gn)
+	return plan, err
+}
+
+func (dsp *DistSQLPlanner) createPlanForInsert(
+	ctx context.Context, planCtx *PlanningCtx, n *insertNode,
+) (*PhysicalPlan, error) {
+	plan, err := dsp.createPhysPlanForPlanNode(ctx, planCtx, n.source)
+	if err != nil {
+		return nil, err
+	}
+	insertSpec := execinfrapb.InsertSpec{}
+	var typs []*types.T
+	if len(n.columns) > 0 {
+		// TODO: is this for RETURNING clause?
+		panic("unimplemented")
+	} else {
+		typs = []*types.T{types.Int}
+	}
+	plan.AddNoGroupingStage(
+		execinfrapb.ProcessorCoreUnion{Insert: &insertSpec},
+		execinfrapb.PostProcessSpec{},
+		typs,
+		execinfrapb.Ordering{})
+	return plan, nil
 }

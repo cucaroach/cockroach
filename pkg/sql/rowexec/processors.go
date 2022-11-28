@@ -385,6 +385,9 @@ func NewProcessor(
 		}
 		return NewGenerativeSplitAndScatterProcessor(ctx, flowCtx, processorID, *core.GenerativeSplitAndScatter, post, outputs[0])
 	}
+	if core.Insert != nil {
+		return newInsertProcessor(ctx, flowCtx, processorID, core.Insert, inputs[0], post, outputs[0])
+	}
 	return nil, errors.Errorf("unsupported processor core %q", core)
 }
 

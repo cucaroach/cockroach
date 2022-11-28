@@ -159,6 +159,7 @@ func FormatBitArrayToType(d *DBitArray, t *types.T) *DBitArray {
 
 // ValueHandler is an interface to allow raw types to extracted from strings.
 type ValueHandler interface {
+	Len() int
 	Null()
 	Date(d pgdate.Date)
 	Datum(d Datum)

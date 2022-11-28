@@ -124,6 +124,7 @@ message ProcessorCoreUnion {
   optional TTLSpec ttl = 39;
   optional HashGroupJoinerSpec hashGroupJoiner = 40;
   optional GenerativeSplitAndScatterSpec generativeSplitAndScatter = 41;
+  optional InsertSpec insert = 42;
 
   reserved 6, 12, 14, 17, 18, 19, 20;
 }

@@ -13,6 +13,7 @@ package optbuilder
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -20,6 +21,27 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
+
+// hlper to see if all exprs are Datums
+func isLiteralValues(values *tree.ValuesClause) bool {
+	for _, exprs := range values.Rows {
+		for _, expr := range exprs {
+			if _, ok := expr.(tree.Datum); !ok {
+				return false
+			}
+			if _, ok := expr.(*tree.Placeholder); ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func buildVectorRows(values *tree.ValuesClause, desiredTypes []*types.T) tree.ExprContainer {
+	batch := coldata.NewMemBatchWithCapacity(desiredTypes, len(values.Rows), coldata.StandardColumnFactory)
+
+	return tree.VectorRows{Batch: batch}
+}
 
 // buildValuesClause builds a set of memo groups that represent the given values
 // clause.
@@ -29,6 +51,14 @@ import (
 func (b *Builder) buildValuesClause(
 	values *tree.ValuesClause, desiredTypes []*types.T, inScope *scope,
 ) (outScope *scope) {
+
+	// In order to test vector inserts lets see if we can build a literal values.
+	// TODO: if testing_vector_insert = on
+	if isLiteralValues(values) {
+		literalValues := &tree.LiteralValuesClause{Rows: buildVectorRows(values, desiredTypes)}
+		return b.buildLiteralValuesClause(literalValues, desiredTypes, inScope)
+	}
+
 	numRows := len(values.Rows)
 	numCols := 0
 	if numRows > 0 {

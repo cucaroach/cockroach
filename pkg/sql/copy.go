@@ -21,6 +21,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
@@ -39,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 )
 
@@ -46,8 +49,13 @@ import (
 // statement.
 const CopyBatchRowSizeDefault = 100
 
+// Vector wise inserts scale much better and this is an efficient default.
+// TODO: test with large rows that fill command buffer size (64mb).  Need to cut
+// batch short when command buffer is almost full.
+const CopyBatchRowSizeVectorDefault = 10_000
+
 // When this many rows are in the copy buffer, they are inserted.
-var copyBatchRowSize = util.ConstantWithMetamorphicTestRange("copy-batch-size", CopyBatchRowSizeDefault, 1, 10000)
+var copyBatchRowSize = util.ConstantWithMetamorphicTestRange("copy-batch-size", CopyBatchRowSizeDefault, 1, 50_000)
 
 // SetCopyFromBatchSize exports overriding copy batch size for test code.
 func SetCopyFromBatchSize(i int) int {
@@ -141,10 +149,16 @@ type copyMachine struct {
 
 	scratchRow []tree.Datum
 
+	batch         coldata.Batch
+	valueHandlers []tree.ValueHandler
+	ph            pgdate.ParseHelper
+
 	// For testing we want to be able to override this on the instance level.
 	copyBatchRowSize int
 
 	implicitTxn bool
+
+	vectorized bool
 }
 
 // newCopyMachine creates a new copyMachine.
@@ -268,6 +282,7 @@ func newCopyMachine(
 		return nil, err
 	}
 	c.resultColumns = make(colinfo.ResultColumns, len(cols))
+	typs := make([]*types.T, len(cols))
 	for i, col := range cols {
 		c.resultColumns[i] = colinfo.ResultColumn{
 			Name:           col.GetName(),
@@ -275,6 +290,7 @@ func newCopyMachine(
 			TableID:        tableDesc.GetID(),
 			PGAttributeNum: uint32(col.GetPGAttributeNum()),
 		}
+		typs[i] = col.GetType()
 	}
 	// If there are no column specifiers and we expect non-visible columns
 	// to have field data then we have to populate the expectedHiddenColumnIdxs
@@ -288,8 +304,23 @@ func newCopyMachine(
 	}
 	c.initMonitoring(ctx, parentMon)
 	c.processRows = c.insertRows
-	c.rows.Init(c.rowsMemAcc, colinfo.ColTypeInfoFromResCols(c.resultColumns), copyBatchRowSize)
-	c.scratchRow = make(tree.Datums, len(c.resultColumns))
+	if c.p.SessionData().VectorizeMode != sessiondatapb.VectorizeOff {
+		// If we're using the row based default size, swap in bigger vector
+		// default, otherwise use the value as is (random metamorphic).
+		if copyBatchRowSize == CopyBatchRowSizeDefault {
+			copyBatchRowSize = CopyBatchRowSizeVectorDefault
+		}
+		c.vectorized = true
+		c.batch = coldata.NewMemBatchWithCapacity(typs, copyBatchRowSize, coldata.StandardColumnFactory)
+		c.valueHandlers = make([]tree.ValueHandler, len(typs))
+		for i := range typs {
+			c.valueHandlers[i] = coldataext.MakeVecHandler(c.batch.ColVec(i))
+		}
+	} else {
+		c.vectorized = false
+		c.rows.Init(c.rowsMemAcc, colinfo.ColTypeInfoFromResCols(c.resultColumns), copyBatchRowSize)
+		c.scratchRow = make(tree.Datums, len(c.resultColumns))
+	}
 	return c, nil
 }
 
@@ -510,7 +541,11 @@ func (c *copyMachine) readTextData(ctx context.Context, final bool) (brk bool, e
 	if c.buf.Len() == 0 && bytes.Equal(line, []byte(`\.`)) {
 		return true, nil
 	}
-	err = c.readTextTuple(ctx, line)
+	if c.vectorized {
+		err = c.readTextTupleVec(ctx, line)
+	} else {
+		err = c.readTextTuple(ctx, line)
+	}
 	return false, err
 }
 
@@ -597,7 +632,11 @@ func (c *copyMachine) readCSVData(ctx context.Context, final bool) (brk bool, er
 		return false, pgerror.Wrap(err, pgcode.BadCopyFileFormat,
 			"read CSV record")
 	}
-	err = c.readCSVTuple(ctx, record)
+	if c.vectorized {
+		err = c.readCSVTupleVec(ctx, record)
+	} else {
+		err = c.readCSVTuple(ctx, record)
+	}
 	return false, err
 }
 
@@ -613,6 +652,29 @@ func (c *copyMachine) maybeIgnoreHiddenColumnsStr(in []csv.Record) []csv.Record 
 	}
 	ret = append(ret, in[nextStartIdx:]...)
 	return ret
+}
+
+func (c *copyMachine) readCSVTupleVec(ctx context.Context, record []csv.Record) error {
+	if expected := len(c.resultColumns) + len(c.expectedHiddenColumnIdxs); expected != len(record) {
+		return pgerror.Newf(pgcode.BadCopyFileFormat,
+			"expected %d values, got %d", expected, len(record))
+	}
+	record = c.maybeIgnoreHiddenColumnsStr(record)
+	vh := c.valueHandlers
+	for i, s := range record {
+		// NB: When we implement FORCE_NULL, then quoted values also are allowed
+		// to be treated as NULL.
+		if !s.Quoted && s.Val == c.null {
+			vh[i].Null()
+			c.batch.SetLength(c.batch.Length() + 1)
+			continue
+		}
+		if err := tree.ParseAndRequireStringEx(c.resultColumns[i].Typ, s.Val, c.parsingEvalCtx, c.valueHandlers[i], &c.ph); err != nil {
+			return err
+		}
+		c.batch.SetLength(c.batch.Length() + 1)
+	}
+	return nil
 }
 
 func (c *copyMachine) readCSVTuple(ctx context.Context, record []csv.Record) error {
@@ -633,7 +695,6 @@ func (c *copyMachine) readCSVTuple(ctx context.Context, record []csv.Record) err
 		if err != nil {
 			return err
 		}
-
 		datums[i] = d
 	}
 	if _, err := c.rows.AddRow(ctx, datums); err != nil {
@@ -859,10 +920,16 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 	defer func() {
 		retErr = cleanup(ctx, retErr)
 	}()
-	if c.rows.Len() == 0 {
+
+	var numRows int
+	if c.vectorized {
+		numRows = c.valueHandlers[0].Len()
+	} else {
+		numRows = c.rows.Len()
+	}
+	if numRows == 0 {
 		return nil
 	}
-	numRows := c.rows.Len()
 
 	if c.p.ExecCfg().TestingKnobs.BeforeCopyFromInsert != nil {
 		if err := c.p.ExecCfg().TestingKnobs.BeforeCopyFromInsert(); err != nil {
@@ -873,7 +940,12 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 	copyFastPath := c.p.SessionData().CopyFastPathEnabled
 	var vc tree.SelectStatement
 	if copyFastPath {
-		vc = &tree.LiteralValuesClause{Rows: &c.rows}
+		if c.vectorized {
+			b := tree.VectorRows{Batch: c.batch}
+			vc = &tree.LiteralValuesClause{Rows: &b}
+		} else {
+			vc = &tree.LiteralValuesClause{Rows: &c.rows}
+		}
 	} else {
 		// This is best effort way of mimic'ing pre-copyFastPath behavior, its
 		// not exactly the same but should suffice to workaround any bugs due to
@@ -985,6 +1057,53 @@ func (c *copyMachine) readTextTuple(ctx context.Context, line []byte) error {
 	}
 	_, err := c.rows.AddRow(ctx, datums)
 	return err
+}
+
+func (c *copyMachine) readTextTupleVec(ctx context.Context, line []byte) error {
+	parts := bytes.Split(line, c.textDelim)
+	if expected := len(c.resultColumns) + len(c.expectedHiddenColumnIdxs); expected != len(parts) {
+		return pgerror.Newf(pgcode.BadCopyFileFormat,
+			"expected %d values, got %d", expected, len(parts))
+	}
+	parts = c.maybeIgnoreHiddenColumnsBytes(parts)
+	for i, part := range parts {
+		// FIXME: is this making a copy?
+		s := string(part)
+		// Disable NULL conversion during file uploads.
+		if !c.forceNotNull && s == c.null {
+			c.batch.SetLength(c.batch.Length() + 1)
+			c.valueHandlers[i].Null()
+			continue
+		}
+		decodeTyp := c.resultColumns[i].Typ
+		for decodeTyp.Family() == types.ArrayFamily {
+			decodeTyp = decodeTyp.ArrayContents()
+		}
+		switch decodeTyp.Family() {
+		case types.BytesFamily,
+			types.DateFamily,
+			types.IntervalFamily,
+			types.INetFamily,
+			types.StringFamily,
+			types.TimestampFamily,
+			types.TimestampTZFamily,
+			types.UuidFamily:
+			s = decodeCopy(s)
+		}
+
+		// FIXME:whats going on with Bytes?
+		// var err error
+		// switch c.resultColumns[i].Typ.Family() {
+		// case types.BytesFamily:
+		// 	d = tree.NewDBytes(tree.DBytes(s))
+		// default:
+
+		if err := tree.ParseAndRequireStringEx(c.resultColumns[i].Typ, s, c.parsingEvalCtx, c.valueHandlers[i], &c.ph); err != nil {
+			return err
+		}
+		c.batch.SetLength(c.batch.Length() + 1)
+	}
+	return nil
 }
 
 // decodeCopy unescapes a single COPY field.
