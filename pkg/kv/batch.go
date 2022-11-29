@@ -433,7 +433,7 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 			return
 		}
 		v.SetBytes(values[i])
-		v, err := marshalValue(&v)
+		v, err = marshalValue(&v)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
@@ -461,7 +461,7 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 			return
 		}
 		v.SetBytes(values[i])
-		v, err := marshalValue(&v)
+		v, err = marshalValue(&v)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
@@ -574,7 +574,7 @@ func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 			return
 		}
 		v.SetTuple(values[i])
-		v, err := marshalValue(&v)
+		v, err = marshalValue(&v)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
