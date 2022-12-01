@@ -12,6 +12,7 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"runtime"
 	"strings"
@@ -79,35 +80,38 @@ func initTest(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
 		); err != nil {
 			t.Fatal(err)
 		}
+		_ = c.RunE(ctx, c.Node(1), "sudo -u postgres createuser roachtest")
+		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "ALTER USER roachtest password 'secret'"`)
+		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT ALL ON SCHEMA public TO roachtest"`)
+		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT pg_read_server_files TO roachtest"`)
+		// user may already exist so ignore error
 	}
 	csv := fmt.Sprintf(tpchLineitemFmt, sf)
 	c.Run(ctx, c.Node(1), "rm -f /tmp/lineitem-table.csv")
 	c.Run(ctx, c.Node(1), fmt.Sprintf("curl '%s' -o /tmp/lineitem-table.csv", csv))
 }
 
-func runTest(ctx context.Context, t test.Test, c cluster.Cluster, pg string) {
+func runTest(ctx context.Context, t test.Test, c cluster.Cluster, docopy func() error) {
 	start := timeutil.Now()
-	det, err := c.RunWithDetailsSingleNode(ctx, t.L(), c.Node(1), fmt.Sprintf(`cat /tmp/lineitem-table.csv | %s -c "COPY lineitem FROM STDIN WITH CSV DELIMITER '|';"`, pg))
-	if err != nil {
-		t.L().Printf("stdout:\n%v\n", det.Stdout)
-		t.L().Printf("stderr:\n%v\n", det.Stderr)
-		t.Fatal(err)
-	}
-	dur := timeutil.Since(start)
-	t.L().Printf("%v\n", det.Stdout)
-	rows := 0
-	copy := ""
-	_, err = fmt.Sscan(det.Stdout, &copy, &rows)
+	err := docopy()
 	require.NoError(t, err)
-	rate := int(float64(rows) / dur.Seconds())
+	dur := timeutil.Since(start)
+
+	det, err := c.RunWithDetailsSingleNode(ctx, t.L(), c.Node(1), "wc -l /tmp/lineitem-table.csv")
+	require.NoError(t, err)
+	rows := 0
+	_, err = fmt.Sscan(det.Stdout, &rows)
+	require.NoError(t, err)
 
 	det, err = c.RunWithDetailsSingleNode(ctx, t.L(), c.Node(1), "wc -c /tmp/lineitem-table.csv")
 	require.NoError(t, err)
 	var bytes float64
 	_, err = fmt.Sscan(det.Stdout, &bytes)
 	require.NoError(t, err)
+
+	rate := int(float64(rows) / dur.Seconds())
 	dataRate := bytes / 1024 / 1024 / dur.Seconds()
-	t.L().Printf("results: %d rows/s, %f mb/s", rate, dataRate)
+	t.L().Printf("results: %d rows/s, %.2f mb/s", rate, dataRate)
 	// Write the copy rate into the stats.json file to be used by roachperf.
 	c.Run(ctx, c.Node(1), "mkdir", t.PerfArtifactsDir())
 	cmd := fmt.Sprintf(
@@ -117,12 +121,41 @@ func runTest(ctx context.Context, t test.Test, c cluster.Cluster, pg string) {
 	c.Run(ctx, c.Node(1), cmd)
 }
 
-func runCopyFromPG(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
+func runCopyFromPG(ctx context.Context, t test.Test, c cluster.Cluster, sf int, freeze bool) {
 	initTest(ctx, t, c, sf)
-	c.Run(ctx, c.Node(1), "psql -d postgres -c 'DROP TABLE IF EXISTS lineitem'")
-	c.Run(ctx, c.Node(1), fmt.Sprintf("psql -d postgres psql -c '%s'", lineitemSchema))
-	c.Run(ctx, c.Node(1), fmt.Sprintf("psql -d postgres psql -c '%s'", lineitemIndexes))
-	runTest(ctx, t, c, "psql -d postgres")
+	db, err := sql.Open("postgres", "database=postgres sslmode=disable user=roachtest password=secret host=localhost port=5433")
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, "DROP TABLE IF EXISTS lineitem")
+	require.NoError(t, err)
+	var tx *sql.Tx
+	if freeze {
+		tx, err = conn.BeginTx(ctx, nil)
+		require.NoError(t, err)
+	}
+	_, err = conn.ExecContext(ctx, lineitemSchema)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, lineitemIndexes)
+	require.NoError(t, err)
+	runTest(ctx, t, c, func() error {
+		var freezeOpt string
+		if freeze {
+			freezeOpt = "FREEZE"
+		}
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("COPY lineitem FROM '%s' CSV DELIMITER '|' %s", "/tmp/lineitem-table.csv", freezeOpt)); err != nil {
+			return err
+		}
+		if freeze {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int, atomic bool) {
@@ -132,8 +165,8 @@ func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int
 	db, err := c.ConnE(ctx, t.L(), 1)
 	require.NoError(t, err)
 	stmt := fmt.Sprintf("ALTER ROLE ALL SET copy_from_atomic_enabled = %t", atomic)
-	_, err = db.ExecContext(ctx, stmt)
-	require.NoError(t, err)
+	_, _ = db.ExecContext(ctx, stmt)
+	// we ignore error on purposes to support older versions
 	urls, err := c.InternalPGUrl(ctx, t.L(), c.Node(1))
 	require.NoError(t, err)
 	m := c.NewMonitor(ctx, c.All())
@@ -141,11 +174,40 @@ func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int
 		// psql w/ url first are doesn't support --db arg so have to do this.
 		url := strings.Replace(urls[0], "?", "/defaultdb?", 1)
 		c.Run(ctx, c.Node(1), fmt.Sprintf("psql %s -c 'SELECT 1'", url))
+		// Note running create table and index create separately is very important for performance as
+		// it affects range splitting, see #91087.
 		c.Run(ctx, c.Node(1), fmt.Sprintf("psql %s -c '%s'", url, lineitemSchema))
-		runTest(ctx, t, c, fmt.Sprintf("psql '%s'", url))
+		c.Run(ctx, c.Node(1), fmt.Sprintf("psql %s -c '%s'", url, lineitemIndexes))
+		runTest(ctx, t, c, func() error {
+			det, err := c.RunWithDetailsSingleNode(ctx, t.L(), c.Node(1),
+				fmt.Sprintf(`cat /tmp/lineitem-table.csv | psql %s -c "COPY lineitem FROM STDIN CSV DELIMITER '|'"`, url))
+			if err != nil {
+				t.L().Printf("stdout:\n%v\n", det.Stdout)
+				t.L().Printf("stderr:\n%v\n", det.Stderr)
+			}
+			return err
+		})
 		return nil
 	})
 	m.Wait()
+}
+
+func runCRDBImport(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
+	c.Put(ctx, t.Cockroach(), "./cockroach", c.All())
+	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.All())
+	initTest(ctx, t, c, sf)
+	db, err := c.ConnE(ctx, t.L(), 1)
+	require.NoError(t, err)
+	// Note running create table and index create separately is very important for performance as
+	// it affects range splitting, see #91087.
+	_, err = db.ExecContext(ctx, lineitemSchema)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, lineitemIndexes)
+	require.NoError(t, err)
+	runTest(ctx, t, c, func() error {
+		_, err = db.ExecContext(ctx, "IMPORT INTO lineitem CSV DATA ('gs://cockroach-fixtures/tpch-csv/sf-1/lineitem.tbl.1?AUTH=implicit') WITH delimiter='|'")
+		return err
+	})
 }
 
 func registerCopyFrom(r registry.Registry) {
@@ -175,11 +237,27 @@ func registerCopyFrom(r registry.Registry) {
 			},
 		})
 		r.Add(registry.TestSpec{
+			Name:    fmt.Sprintf("copyfrom/crdb-import/sf=%d/nodes=%d", tc.sf, tc.nodes),
+			Owner:   registry.OwnerKV,
+			Cluster: r.MakeClusterSpec(tc.nodes),
+			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+				runCRDBImport(ctx, t, c, tc.sf)
+			},
+		})
+		r.Add(registry.TestSpec{
 			Name:    fmt.Sprintf("copyfrom/pg/sf=%d/nodes=%d", tc.sf, tc.nodes),
 			Owner:   registry.OwnerKV,
 			Cluster: r.MakeClusterSpec(tc.nodes),
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-				runCopyFromPG(ctx, t, c, tc.sf)
+				runCopyFromPG(ctx, t, c, tc.sf, false)
+			},
+		})
+		r.Add(registry.TestSpec{
+			Name:    fmt.Sprintf("copyfrom/pg-freeze/sf=%d/nodes=%d", tc.sf, tc.nodes),
+			Owner:   registry.OwnerKV,
+			Cluster: r.MakeClusterSpec(tc.nodes),
+			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+				runCopyFromPG(ctx, t, c, tc.sf, true)
 			},
 		})
 	}
