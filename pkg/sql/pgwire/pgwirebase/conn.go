@@ -26,6 +26,8 @@ type Conn interface {
 	// updating connection metrics.
 	Rd() BufferedReader
 
+	GetReadBuffer() *ReadBuffer
+
 	// BeginCopyIn sends the message server message initiating the Copy-in
 	// subprotocol (COPY ... FROM STDIN). This message informs the client about
 	// the columns that are expected for the rows to be inserted.

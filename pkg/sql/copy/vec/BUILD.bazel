@@ -1,0 +1,20 @@
+load("//build/bazelutil/unused_checker:unused.bzl", "get_x_data")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "vec",
+    srcs = ["vec_handlers.go"],
+    importpath = "github.com/cockroachdb/cockroach/pkg/sql/copy/vec",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/col/coldata",
+        "//pkg/sql/sem/tree",
+        "//pkg/sql/types",
+        "//pkg/util/duration",
+        "//pkg/util/json",
+        "//pkg/util/timeutil/pgdate",
+        "@com_github_cockroachdb_apd_v3//:apd",
+    ],
+)
+
+get_x_data(name = "get_x_data")

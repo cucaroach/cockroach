@@ -329,7 +329,7 @@ func (c *conn) serveImpl(
 		}
 		return nil
 	})
-	c.rd = *bufio.NewReader(c.conn)
+	c.rd = *bufio.NewReaderSize(c.conn, 1<<15)
 
 	// the authPipe below logs authentication messages iff its auth
 	// logger is non-nil. We define this here.
@@ -1233,6 +1233,10 @@ func (c *conn) SendCommandComplete(tag []byte) error {
 // Rd is part of the pgwirebase.Conn interface.
 func (c *conn) Rd() pgwirebase.BufferedReader {
 	return &pgwireReader{conn: c}
+}
+
+func (c *conn) GetReadBuffer() *pgwirebase.ReadBuffer {
+	return &c.readBuf
 }
 
 // flushInfo encapsulates information about what results have been flushed to

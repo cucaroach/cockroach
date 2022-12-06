@@ -344,9 +344,7 @@ func (c *copyMachine) run(ctx context.Context) error {
 	}
 
 	// Read from the connection until we see an ClientMsgCopyDone.
-	readBuf := pgwirebase.MakeReadBuffer(
-		pgwirebase.ReadBufferOptionWithClusterSettings(&c.p.execCfg.Settings.SV),
-	)
+	readBuf := c.conn.GetReadBuffer()
 
 	switch c.format {
 	case tree.CopyFormatText:
@@ -362,13 +360,14 @@ func (c *copyMachine) run(ctx context.Context) error {
 		}
 	}
 
+	rd := c.conn.Rd()
 Loop:
 	for {
-		typ, _, err := readBuf.ReadTypedMsg(c.conn.Rd())
+		typ, _, err := readBuf.ReadTypedMsg(rd)
 		if err != nil {
 			if pgwirebase.IsMessageTooBigError(err) && typ == pgwirebase.ClientMsgCopyData {
 				// Slurp the remaining bytes.
-				_, slurpErr := readBuf.SlurpBytes(c.conn.Rd(), pgwirebase.GetMessageTooBigSize(err))
+				_, slurpErr := readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(err))
 				if slurpErr != nil {
 					return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
 				}
@@ -378,7 +377,7 @@ Loop:
 				// protocol, so we don't need to look for Sync messages. See
 				// https://www.postgresql.org/docs/13/protocol-flow.html#PROTOCOL-COPY
 				for {
-					typ, _, slurpErr = readBuf.ReadTypedMsg(c.conn.Rd())
+					typ, _, slurpErr = readBuf.ReadTypedMsg(rd)
 					if typ == pgwirebase.ClientMsgCopyDone || typ == pgwirebase.ClientMsgCopyFail {
 						break
 					}
@@ -386,7 +385,7 @@ Loop:
 						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
 					}
 
-					_, slurpErr = readBuf.SlurpBytes(c.conn.Rd(), pgwirebase.GetMessageTooBigSize(slurpErr))
+					_, slurpErr = readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(slurpErr))
 					if slurpErr != nil {
 						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
 					}
@@ -398,13 +397,14 @@ Loop:
 		switch typ {
 		case pgwirebase.ClientMsgCopyData:
 			if err := c.processCopyData(
-				ctx, string(readBuf.Msg), false, /* final */
+				ctx, readBuf.Msg, false, /* final */
 			); err != nil {
 				return err
 			}
+			readBuf.Msg = readBuf.Msg[:0]
 		case pgwirebase.ClientMsgCopyDone:
 			if err := c.processCopyData(
-				ctx, "" /* data */, true, /* final */
+				ctx, nil /* data */, true, /* final */
 			); err != nil {
 				return err
 			}
@@ -437,7 +437,7 @@ const (
 //
 // Args:
 // final: If set, buffered data is written even if the buffer is not full.
-func (c *copyMachine) processCopyData(ctx context.Context, data string, final bool) (retErr error) {
+func (c *copyMachine) processCopyData(ctx context.Context, data []byte, final bool) (retErr error) {
 	// At the end, adjust the mem accounting to reflect what's left in the buffer.
 	defer func() {
 		if err := c.bufMemAcc.ResizeTo(ctx, int64(c.buf.Cap())); err != nil && retErr == nil {
@@ -453,7 +453,7 @@ func (c *copyMachine) processCopyData(ctx context.Context, data string, final bo
 			return err
 		}
 	}
-	c.buf.WriteString(data)
+	c.buf.Write(data)
 	var readFn func(ctx context.Context, final bool) (brk bool, err error)
 	switch c.format {
 	case tree.CopyFormatText:

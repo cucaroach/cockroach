@@ -194,7 +194,7 @@ func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh Valu
 		return nil
 	case types.DateFamily:
 		now := relativeParseTime(ctx)
-		t, _, err := pgdate.ParseDateEx(now, dateStyle(ctx), s, ph)
+		t, _, err := pgdate.ParseDate(now, dateStyle(ctx), s, ph)
 		if err == nil {
 			vh.Date(t)
 			return nil
