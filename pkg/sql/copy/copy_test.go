@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql/driver"
-	"encoding/csv"
 	"fmt"
 	"io"
 	"math"
@@ -57,6 +56,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -397,9 +397,7 @@ func BenchmarkCopyFromSF1(b *testing.B) {
 	data, err := os.ReadFile(path)
 	require.NoError(b, err)
 
-	s, _, _ := serverutils.StartServer(b, base.TestServerArgs{
-		Settings: cluster.MakeTestingClusterSettings(),
-	})
+	s, _, _ := serverutils.StartServer(b, tsa)
 	defer s.Stopper().Stop(ctx)
 
 	url, cleanup := sqlutils.PGUrl(b, s.ServingSQLAddr(), "copytest", url.User(username.RootUser))
@@ -494,7 +492,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseDatum(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for _, r := range records {
 			for col, f := range r {
-				_, _, err := tree.ParseAndRequireString(typs[col], f, pctx)
+				_, _, err := tree.ParseAndRequireString(typs[col], f.String(), pctx)
 				require.NoError(b, err)
 			}
 		}
@@ -526,7 +524,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseCol(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for row, r := range records {
 			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f, pctx, vecHandlers[col], &pgdate.ParseHelper{})
+				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &pgdate.ParseHelper{})
 				if err != nil {
 					require.NoError(b, err)
 				}
@@ -568,7 +566,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseColEx(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for row, r := range records {
 			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f, pctx, vecHandlers[col], &ph)
+				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
 				if err != nil {
 					require.NoError(b, err)
 				}
@@ -585,7 +583,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseColEx(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 }
 
-func readAll(data []byte) ([][]string, error) {
+func readAll(data []byte) ([][]csv.Record, error) {
 	csvReader := csv.NewReader(bytes.NewReader(data))
 	csvReader.ReuseRecord = true
 	csvReader.Comma = '|'
@@ -626,7 +624,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseBatch(b *testing.B) {
 				}
 			}
 			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f, pctx, vecHandlers[col], &ph)
+				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
 				if err != nil {
 					require.NoError(b, err)
 				}
@@ -674,7 +672,7 @@ var tsa = base.TestServerArgs{Settings: st, CacheSize: 2 << 30}
 var pctx = tree.NewParseTimeContext(timeutil.Now())
 var pm row.PartialIndexUpdateHelper
 
-func recordsToRC(records [][]string) (*rowcontainer.RowContainer, error) {
+func recordsToRC(records [][]csv.Record) (*rowcontainer.RowContainer, error) {
 	ctx := context.Background()
 	m := mon.NewUnlimitedMonitor(ctx, "test", mon.MemoryResource, nil, nil, math.MaxInt64, st)
 	rc := rowcontainer.NewRowContainer(m.MakeBoundAccount(), colinfo.ColTypeInfoFromColTypes(typs))
@@ -682,7 +680,7 @@ func recordsToRC(records [][]string) (*rowcontainer.RowContainer, error) {
 	for _, r := range records {
 		for col, f := range r {
 			var err error
-			datums[col], _, err = tree.ParseAndRequireString(typs[col], f, pctx)
+			datums[col], _, err = tree.ParseAndRequireString(typs[col], f.String(), pctx)
 			if err != nil {
 				return nil, err
 			}
@@ -1157,7 +1155,7 @@ func BenchmarkCopyFromTPCHSF1_1KVBuildFromCol(b *testing.B) {
 	var ph pgdate.ParseHelper
 	for _, r := range records {
 		for col, f := range r {
-			err := tree.ParseAndRequireStringEx(typs[col], f, pctx, vecHandlers[col], &ph)
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
 			if err != nil {
 				require.NoError(b, err)
 			}
@@ -1262,7 +1260,7 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
 
 	for _, r := range records {
 		for col, f := range r {
-			err := tree.ParseAndRequireStringEx(typs[col], f, pctx, vecHandlers[col], &ph)
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
 			if err != nil {
 				require.NoError(b, err)
 			}
