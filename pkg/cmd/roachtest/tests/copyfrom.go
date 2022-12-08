@@ -63,6 +63,17 @@ CREATE INDEX  l_pk_sk ON lineitem (l_partkey, l_suppkey);
 CREATE INDEX  l_sk_pk ON lineitem (l_suppkey, l_partkey);
 `
 
+var lineitemSplits string = `
+ALTER INDEX l_ok SPLIT AT VALUES (0);
+ALTER INDEX l_pk SPLIT AT VALUES (0);
+ALTER INDEX l_sk SPLIT AT VALUES (0);
+ALTER INDEX l_sd SPLIT AT VALUES (0::DATE);
+ALTER INDEX l_cd SPLIT AT VALUES (0::DATE);
+ALTER INDEX l_rd SPLIT AT VALUES (0::DATE);
+ALTER INDEX l_pk_sk SPLIT AT VALUES (0,0);
+ALTER INDEX l_sk_pk SPLIT AT VALUES (0,0);
+`
+
 func initTest(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
 	if runtime.GOOS == "linux" {
 		if err := repeatRunE(
@@ -160,7 +171,9 @@ func runCopyFromPG(ctx context.Context, t test.Test, c cluster.Cluster, sf int, 
 
 func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int, atomic bool) {
 	c.Put(ctx, t.Cockroach(), "./cockroach", c.All())
-	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.All())
+	startOpts := option.DefaultStartOpts()
+	//	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--store=type=mem,size=1GB")
+	c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
 	initTest(ctx, t, c, sf)
 	db, err := c.ConnE(ctx, t.L(), 1)
 	require.NoError(t, err)

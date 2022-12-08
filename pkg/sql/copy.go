@@ -11,6 +11,7 @@
 package sql
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -35,9 +36,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/dustin/go-humanize"
 )
 
 // CopyBatchRowSizeDefault is the number of rows we insert in one insert
@@ -140,6 +144,8 @@ type copyMachine struct {
 
 	// For testing we want to be able to override this on the instance level.
 	copyBatchRowSize int
+
+	insertDuration time.Duration
 
 	implicitTxn bool
 }
@@ -331,6 +337,112 @@ func (c *copyMachine) Close(ctx context.Context) {
 	c.copyMon.Stop(ctx)
 }
 
+type copyDataReader struct {
+	r              pgwirebase.BufferedReader
+	byteCount      int64
+	maxMessageSize int
+	stillToRead    int
+}
+
+var _ io.Reader = &copyDataReader{}
+
+func (c *copyDataReader) readMessage(p []byte) (int, error) {
+	// Peek in case we can't read it all, 5 because of ClientMessageType
+	b, err := c.r.Peek(5)
+	if err != nil {
+		return 0, err
+	}
+	size := int(binary.BigEndian.Uint32(b[1:]))
+	// size includes itself.
+	size -= 4
+
+	// It won't fit, read what we can and remember what was left.
+	if size > len(p) {
+		c.stillToRead = size - len(p)
+		size = len(p)
+	}
+
+	// skip ClientMessageType and length bytes
+	tmp := [5]byte{}
+	if _, err := c.r.Read(tmp[:]); err != nil {
+		return 0, err
+	}
+
+	if size > c.maxMessageSize || size < 0 {
+		err := errors.WithHintf(
+			pgwirebase.NewProtocolViolationErrorf(
+				"message size %s bigger than maximum allowed message size %s",
+				humanize.IBytes(uint64(size)),
+				humanize.IBytes(uint64(c.maxMessageSize)),
+			),
+			"the maximum message size can be configured using the %s cluster setting",
+			pgwirebase.ReadBufferMaxMessageSizeClusterSettingName,
+		)
+		return 0, err
+	}
+	if _, err := io.ReadFull(c.r, p[:size]); err != nil {
+		return 0, err
+	}
+	return size, nil
+}
+
+func (c *copyDataReader) Read(p []byte) (int, error) {
+	n := 0
+	// After we see CopyDataDone r is set to nil.
+	if c.r == nil {
+		return 0, io.EOF
+	}
+	// If we didn't completely read a CopyData segment, try to finish it.
+	if c.stillToRead > 0 {
+		toRead := c.stillToRead
+		if toRead > len(p) {
+			toRead = len(p)
+		}
+		n, err := c.r.Read(p[:toRead])
+		if err == nil {
+			c.stillToRead -= n
+		}
+		c.byteCount += int64(n)
+		return n, err
+	}
+	// Keep trying while there's room left.
+	for n < len(p) {
+		b, err := c.r.Peek(1)
+		if err != nil {
+			return 0, err
+		}
+		typ := pgwirebase.ClientMessageType(b[0])
+		switch typ {
+		case pgwirebase.ClientMsgCopyData:
+			read, err := c.readMessage(p[n:])
+			if err != nil {
+				return 0, err
+			}
+			n += read
+		case pgwirebase.ClientMsgCopyDone:
+			_, err := c.readMessage(p[n:])
+			if err != nil {
+				return 0, err
+			}
+			c.r = nil
+			c.byteCount += int64(n)
+			return n, nil
+		case pgwirebase.ClientMsgCopyFail:
+			_, err := c.readMessage(p[n:])
+			if err != nil {
+				return 0, err
+			}
+			return 0, pgerror.Newf(pgcode.QueryCanceled, "COPY from stdin failed: %s", string(p[n:]))
+		case pgwirebase.ClientMsgFlush, pgwirebase.ClientMsgSync:
+			// Spec says to "ignore Flush and Sync messages received during copy-in mode".
+		default:
+			return 0, pgwirebase.NewUnrecognizedMsgTypeErr(typ)
+		}
+	}
+	c.byteCount += int64(n)
+	return n, nil
+}
+
 // run consumes all the copy-in data from the network connection and inserts it
 // in the database.
 func (c *copyMachine) run(ctx context.Context) error {
@@ -344,14 +456,18 @@ func (c *copyMachine) run(ctx context.Context) error {
 	}
 
 	// Read from the connection until we see an ClientMsgCopyDone.
-	readBuf := c.conn.GetReadBuffer()
+	copyDataReader := copyDataReader{r: c.conn.Rd(), maxMessageSize: int(pgwirebase.ReadBufferMaxMessageSizeClusterSetting.Get(&c.p.execCfg.Settings.SV))}
+	// Wrap copyDataReader in a bufio.Reader so we can accumulate lots of small CopyData segments
+	r := bufio.NewReaderSize(&copyDataReader, 1<<16)
+	readFn := c.readBinaryRow
 
 	switch c.format {
 	case tree.CopyFormatText:
 		c.textDelim = []byte{c.delimiter}
+		readFn = c.readTextRow
 	case tree.CopyFormatCSV:
-		c.csvInput.Reset()
-		c.csvReader = csv.NewReader(&c.csvInput)
+		readFn = c.readCSVRow
+		c.csvReader = csv.NewReader(r)
 		c.csvReader.Comma = rune(c.delimiter)
 		c.csvReader.ReuseRecord = true
 		c.csvReader.FieldsPerRecord = len(c.resultColumns) + len(c.expectedHiddenColumnIdxs)
@@ -360,63 +476,86 @@ func (c *copyMachine) run(ctx context.Context) error {
 		}
 	}
 
-	rd := c.conn.Rd()
-Loop:
-	for {
-		typ, _, err := readBuf.ReadTypedMsg(rd)
-		if err != nil {
-			if pgwirebase.IsMessageTooBigError(err) && typ == pgwirebase.ClientMsgCopyData {
-				// Slurp the remaining bytes.
-				_, slurpErr := readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(err))
-				if slurpErr != nil {
-					return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-				}
-
-				// As per the pgwire spec, we must continue reading until we encounter
-				// CopyDone or CopyFail. We don't support COPY in the extended
-				// protocol, so we don't need to look for Sync messages. See
-				// https://www.postgresql.org/docs/13/protocol-flow.html#PROTOCOL-COPY
-				for {
-					typ, _, slurpErr = readBuf.ReadTypedMsg(rd)
-					if typ == pgwirebase.ClientMsgCopyDone || typ == pgwirebase.ClientMsgCopyFail {
-						break
-					}
-					if slurpErr != nil && !pgwirebase.IsMessageTooBigError(slurpErr) {
-						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-					}
-
-					_, slurpErr = readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(slurpErr))
-					if slurpErr != nil {
-						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-					}
-				}
+	for row := 1; ; row++ {
+		if err := readFn(ctx, r); err != nil {
+			if err == io.EOF {
+				break
 			}
 			return err
 		}
-
-		switch typ {
-		case pgwirebase.ClientMsgCopyData:
-			if err := c.processCopyData(
-				ctx, readBuf.Msg, false, /* final */
-			); err != nil {
+		if row%copyBatchRowSize == 0 {
+			log.Warningf(ctx, "copy inc rate: %s", humanizeutil.DataRate(copyDataReader.byteCount, c.insertDuration))
+			if err := c.processRows(ctx, false); err != nil {
 				return err
 			}
-			readBuf.Msg = readBuf.Msg[:0]
-		case pgwirebase.ClientMsgCopyDone:
-			if err := c.processCopyData(
-				ctx, nil /* data */, true, /* final */
-			); err != nil {
-				return err
-			}
-			break Loop
-		case pgwirebase.ClientMsgCopyFail:
-			return pgerror.Newf(pgcode.QueryCanceled, "COPY from stdin failed: %s", string(readBuf.Msg))
-		case pgwirebase.ClientMsgFlush, pgwirebase.ClientMsgSync:
-			// Spec says to "ignore Flush and Sync messages received during copy-in mode".
-		default:
-			return pgwirebase.NewUnrecognizedMsgTypeErr(typ)
 		}
 	}
+
+	if c.rows.Len() > 0 {
+		if err := c.processRows(ctx, true); err != nil {
+			return err
+		}
+	}
+	log.Warningf(ctx, "copy rate: %s", humanizeutil.DataRate(copyDataReader.byteCount, c.insertDuration))
+
+	/*
+	   Loop:
+	   	for {
+	   		typ, _, err := readBuf.ReadTypedMsg(rd)
+	   		if err != nil {
+	   			if pgwirebase.IsMessageTooBigError(err) && typ == pgwirebase.ClientMsgCopyData {
+	   				// Slurp the remaining bytes.
+	   				_, slurpErr := readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(err))
+	   				if slurpErr != nil {
+	   					return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
+	   				}
+
+	   				// As per the pgwire spec, we must continue reading until we encounter
+	   				// CopyDone or CopyFail. We don't support COPY in the extended
+	   				// protocol, so we don't need to look for Sync messages. See
+	   				// https://www.postgresql.org/docs/13/protocol-flow.html#PROTOCOL-COPY
+	   				for {
+	   					typ, _, slurpErr = readBuf.ReadTypedMsg(rd)
+	   					if typ == pgwirebase.ClientMsgCopyDone || typ == pgwirebase.ClientMsgCopyFail {
+	   						break
+	   					}
+	   					if slurpErr != nil && !pgwirebase.IsMessageTooBigError(slurpErr) {
+	   						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
+	   					}
+
+	   					_, slurpErr = readBuf.SlurpBytes(rd, pgwirebase.GetMessageTooBigSize(slurpErr))
+	   					if slurpErr != nil {
+	   						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
+	   					}
+	   				}
+	   			}
+	   			return err
+	   		}
+
+	   		switch typ {
+	   		case pgwirebase.ClientMsgCopyData:
+	   			if err := c.processCopyData(
+	   				ctx, readBuf.Msg, false, /* final
+	   			); err != nil {
+	   				return err
+	   			}
+	   			readBuf.Msg = readBuf.Msg[:0]
+	   		case pgwirebase.ClientMsgCopyDone:
+	   			if err := c.processCopyData(
+	   				ctx, nil, true, /* final
+	   			); err != nil {
+	   				return err
+	   			}
+	   			break Loop
+	   		case pgwirebase.ClientMsgCopyFail:
+	   			return pgerror.Newf(pgcode.QueryCanceled, "COPY from stdin failed: %s", string(readBuf.Msg))
+	   		case pgwirebase.ClientMsgFlush, pgwirebase.ClientMsgSync:
+	   			// Spec says to "ignore Flush and Sync messages received during copy-in mode".
+	   		default:
+	   			return pgwirebase.NewUnrecognizedMsgTypeErr(typ)
+	   		}
+	   	}
+	*/
 
 	// Finalize execution by sending the statement tag and number of rows
 	// inserted.
@@ -504,6 +643,27 @@ func (c *copyMachine) readTextData(ctx context.Context, final bool) (brk bool, e
 	}
 	err = c.readTextTuple(ctx, line)
 	return false, err
+}
+
+func (c *copyMachine) readTextRow(ctx context.Context, r *bufio.Reader) error {
+	return nil
+}
+
+func (c *copyMachine) readCSVRow(ctx context.Context, r *bufio.Reader) error {
+	record, err := c.csvReader.Read()
+	// Look for end of data before checking for errors, since a field count
+	// error will still return record data.
+	if len(record) == 1 && !record[0].Quoted && record[0].Val == endOfData && c.buf.Len() == 0 {
+		return nil
+	}
+	if err != nil {
+		if err == io.EOF {
+			return err
+		}
+		return pgerror.Wrap(err, pgcode.BadCopyFileFormat,
+			"read CSV record")
+	}
+	return c.readCSVTuple(ctx, record)
 }
 
 func (c *copyMachine) readCSVData(ctx context.Context, final bool) (brk bool, err error) {
@@ -631,6 +791,10 @@ func (c *copyMachine) readCSVTuple(ctx context.Context, record []csv.Record) err
 	if _, err := c.rows.AddRow(ctx, datums); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (c *copyMachine) readBinaryRow(ctx context.Context, r *bufio.Reader) error {
 	return nil
 }
 
@@ -820,6 +984,10 @@ func (p *planner) preparePlannerForCopy(
 
 // insertRows transforms the buffered rows into an insertNode and executes it.
 func (c *copyMachine) insertRows(ctx context.Context, finalBatch bool) (retErr error) {
+	start := timeutil.Now()
+	defer func() {
+		c.insertDuration += time.Since(start)
+	}()
 	cleanup := c.p.preparePlannerForCopy(ctx, &c.txnOpt, finalBatch, c.implicitTxn)
 	defer func() {
 		retErr = cleanup(ctx, retErr)
@@ -860,6 +1028,7 @@ func (c *copyMachine) insertRows(ctx context.Context, finalBatch bool) (retErr e
 		},
 		Returning: tree.AbsentReturningClause,
 	}
+
 	if err := c.p.makeOptimizerPlan(ctx); err != nil {
 		return err
 	}
@@ -877,6 +1046,7 @@ func (c *copyMachine) insertRows(ctx context.Context, finalBatch bool) (retErr e
 		log.Fatalf(ctx, "didn't insert all buffered rows and yet no error was reported. "+
 			"Inserted %d out of %d rows.", rows, numRows)
 	}
+
 	c.insertedRows += numRows
 	// We're done reset for next batch.
 	return c.rows.UnsafeReset(ctx)

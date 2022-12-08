@@ -50,13 +50,13 @@ const (
 	minReadBufferMessageSize        = 1 << 14
 )
 
-const readBufferMaxMessageSizeClusterSettingName = "sql.conn.max_read_buffer_message_size"
+const ReadBufferMaxMessageSizeClusterSettingName = "sql.conn.max_read_buffer_message_size"
 
 // ReadBufferMaxMessageSizeClusterSetting is the cluster setting for configuring
 // ReadBuffer default message sizes.
 var ReadBufferMaxMessageSizeClusterSetting = settings.RegisterByteSizeSetting(
 	settings.TenantWritable,
-	readBufferMaxMessageSizeClusterSettingName,
+	ReadBufferMaxMessageSizeClusterSettingName,
 	"maximum buffer size to allow for ingesting sql statements. Connections must be restarted for this to take effect.",
 	defaultMaxReadBufferMessageSize,
 	func(val int64) error {
@@ -80,13 +80,15 @@ const (
 )
 
 var _ BufferedReader = &bufio.Reader{}
-var _ BufferedReader = &bytes.Buffer{}
+
+//var _ BufferedReader = &bytes.Buffer{}
 
 // BufferedReader extended io.Reader with some convenience methods.
 type BufferedReader interface {
 	io.Reader
 	ReadString(delim byte) (string, error)
 	ReadByte() (byte, error)
+	Peek(n int) ([]byte, error)
 }
 
 // ReadBuffer provides a convenient way to read pgwire protocol messages.
@@ -124,6 +126,9 @@ func MakeReadBuffer(opts ...ReadBufferOption) ReadBuffer {
 // at the end of the existing slice when possible and allocating a new
 // slice when necessary.
 func (b *ReadBuffer) reset(size int) {
+	// N.B. this moves the start of the slice forward so as not to reuse existing bytes.
+	// This is on purposes because we create direct strings into the buffer and reuse would
+	// mutate those string pointers.
 	if b.Msg != nil {
 		b.Msg = b.Msg[len(b.Msg):]
 	}
@@ -165,7 +170,7 @@ func (b *ReadBuffer) ReadUntypedMsg(rd io.Reader) (int, error) {
 				humanize.IBytes(uint64(b.maxMessageSize)),
 			),
 			"the maximum message size can be configured using the %s cluster setting",
-			readBufferMaxMessageSizeClusterSettingName,
+			ReadBufferMaxMessageSizeClusterSettingName,
 		)
 		if size > 0 {
 			err = withMessageTooBigError(err, size)

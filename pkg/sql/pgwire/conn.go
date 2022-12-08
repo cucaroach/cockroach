@@ -193,7 +193,7 @@ func newConn(
 		sessionArgs: sArgs,
 		metrics:     metrics,
 		startTime:   connStart,
-		rd:          *bufio.NewReader(netConn),
+		rd:          *bufio.NewReaderSize(netConn, 1<<17),
 		sv:          sv,
 		readBuf:     pgwirebase.MakeReadBuffer(pgwirebase.ReadBufferOptionWithClusterSettings(sv)),
 	}
@@ -1868,6 +1868,11 @@ func (r *pgwireReader) ReadByte() (byte, error) {
 		r.conn.metrics.BytesInCount.Inc(1)
 	}
 	return b, err
+}
+
+// Peel is part of the pgwirebase.BufferedReader interface.
+func (r *pgwireReader) Peek(n int) ([]byte, error) {
+	return r.conn.rd.Peek(n)
 }
 
 // statusReportParams is a list of session variables that are also
