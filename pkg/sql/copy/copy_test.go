@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -668,7 +669,10 @@ func (n noopPutter) InitPut(key, value interface{}, failOnTombstones bool) {}
 func (n noopPutter) Del(key ...interface{})                                {}
 
 var st = cluster.MakeTestingClusterSettings()
-var tsa = base.TestServerArgs{Settings: st, CacheSize: 2 << 30}
+var tsa = base.TestServerArgs{
+	Settings:  st,
+	CacheSize: 2 << 30,
+}
 var pctx = tree.NewParseTimeContext(timeutil.Now())
 var pm row.PartialIndexUpdateHelper
 
@@ -991,9 +995,27 @@ func encodePK(ctx context.Context, rh *row.RowHelper, batch *kv.Batch, desc cata
 
 var traceKV = false
 
+type KVS struct {
+	keys   []roachpb.Key
+	values [][]byte
+}
+
+var _ sort.Interface = &KVS{}
+
+func (k *KVS) Len() int {
+	return len(k.keys)
+}
+func (k *KVS) Less(i, j int) bool {
+	return bytes.Compare(k.keys[i], k.keys[j]) < 0
+}
+func (k *KVS) Swap(i, j int) {
+	k.keys[i], k.keys[j] = k.keys[j], k.keys[i]
+	k.values[i], k.values[j] = k.values[j], k.values[i]
+}
+
 func encodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, b *kv.Batch,
 	desc catalog.TableDescriptor, ind catalog.Index,
-	vecs []tree.ValueHandler, colMap catalog.TableColMap, from int, count int) error {
+	vecs []tree.ValueHandler, colMap catalog.TableColMap, from int, count int, srt bool) error {
 	fetchedCols := desc.PublicColumns()
 	//entries, err := rowenc.EncodeSecondaryIndex(rh.Codec, rh.TableDesc, index, colIDtoRowIndex, values, includeEmpty)
 	secondaryIndexKeyPrefix := rowenc.MakeIndexKeyPrefix(codec, desc.GetID(), ind.GetID())
@@ -1078,6 +1100,13 @@ func encodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, b *kv.Batch,
 	}
 	//values[rowoffset] = writeColumnValues
 
+	if srt {
+		kvs := KVS{keys: kys, values: values}
+		sort.Sort(&kvs)
+		kys = kvs.keys
+		values = kvs.values
+	}
+
 	if traceKV {
 		var value roachpb.Value
 		for rowoffset := 0; rowoffset < count; rowoffset++ {
@@ -1102,10 +1131,8 @@ func encodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, b *kv.Batch,
 
 }
 
-func buildKVBatchesFromVecs(ctx context.Context, txn *kv.Txn, numRows int, rh *row.RowHelper, colMap catalog.TableColMap,
-	vecHandlers []tree.ValueHandler) ([]*kv.Batch, error) {
-	// Empirically 1k yields best performance but with some kvclient optimizations maybe we can go bigger
-	const batchSize = 1 << 10
+func buildKVBatchesFromVecs(ctx context.Context, batchSize int, txn *kv.Txn, numRows int, rh *row.RowHelper, colMap catalog.TableColMap,
+	vecHandlers []tree.ValueHandler, sort bool) ([]*kv.Batch, error) {
 	var batches []*kv.Batch
 	for i := 0; i < numRows; i += batchSize {
 		batch := txn.NewBatch()
@@ -1119,7 +1146,7 @@ func buildKVBatchesFromVecs(ctx context.Context, txn *kv.Txn, numRows int, rh *r
 			return nil, err
 		}
 		for _, ind := range rh.TableDesc.WritableNonPrimaryIndexes() {
-			err = encodeSecondaryIndex(ctx, rh, batch, rh.TableDesc, ind, vecHandlers, colMap, i, thisBatchSize)
+			err = encodeSecondaryIndex(ctx, rh, batch, rh.TableDesc, ind, vecHandlers, colMap, i, thisBatchSize, sort)
 			if err != nil {
 				return nil, err
 			}
@@ -1168,7 +1195,7 @@ func BenchmarkCopyFromTPCHSF1_1KVBuildFromCol(b *testing.B) {
 	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), &st.SV, false, nil)
 	rh.PrimaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(rh.Codec, rh.TableDesc.GetID(), rh.TableDesc.GetPrimaryIndexID())
 	b.ResetTimer()
-	_, err = buildKVBatchesFromVecs(ctx, txn, len(records), &rh, colIDToRowIndex, vecHandlers)
+	_, err = buildKVBatchesFromVecs(ctx, 1<<10, txn, len(records), &rh, colIDToRowIndex, vecHandlers, false)
 	require.NoError(b, err)
 	b.SetBytes(int64(datalen))
 }
@@ -1178,6 +1205,9 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromDatum(b *testing.B) {
 	defer leaktest.AfterTest(b)()
 	defer log.Scope(b).Close(b)
 	//	log.SetVModule("inserter=2,writer=2")
+	tempDir, cleanup := testutils.TempDir(b)
+	defer cleanup()
+	tsa.StoreSpecs = []base.StoreSpec{{Path: tempDir}}
 	s, db, kvdb := serverutils.StartServer(b, tsa)
 	defer s.Stopper().Stop(ctx)
 	_, err := db.Exec(lineitemURLSchema)
@@ -1189,7 +1219,6 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromDatum(b *testing.B) {
 	var rc *rowcontainer.RowContainer
 	{
 		path, err := filepath.Abs("lineitem.tbl.1")
-		fmt.Println(path)
 		require.NoError(b, err)
 		data, err := os.ReadFile(path)
 		require.NoError(b, err)
@@ -1227,10 +1256,13 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromDatum(b *testing.B) {
 	b.SetBytes(int64(datalen))
 }
 
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
+func insertFromCol(b *testing.B, batchSize int, sorted bool) {
 	ctx := context.Background()
 	defer leaktest.AfterTest(b)()
 	defer log.Scope(b).Close(b)
+	tempDir, cleanup := testutils.TempDir(b)
+	defer cleanup()
+	tsa.StoreSpecs = []base.StoreSpec{{Path: tempDir}}
 	s, db, kvdb := serverutils.StartServer(b, tsa)
 	defer s.Stopper().Stop(ctx)
 	_, err := db.Exec(lineitemURLSchema)
@@ -1273,7 +1305,7 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
 	var metrics *rowinfra.Metrics
 	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), &st.SV, false, metrics)
 	rh.PrimaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(rh.Codec, rh.TableDesc.GetID(), rh.TableDesc.GetPrimaryIndexID())
-	batches, err := buildKVBatchesFromVecs(ctx, txn, len(records), &rh, colIDToRowIndex, vecHandlers)
+	batches, err := buildKVBatchesFromVecs(ctx, batchSize, txn, len(records), &rh, colIDToRowIndex, vecHandlers, sorted)
 	require.NoError(b, err)
 
 	b.ResetTimer()
@@ -1284,4 +1316,22 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
 	err = txn.Commit(ctx)
 	require.NoError(b, err)
 	b.SetBytes(int64(datalen))
+}
+
+func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
+	insertFromCol(b, 1<<10, false)
+}
+func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted(b *testing.B) {
+	insertFromCol(b, 1<<10, true)
+}
+
+func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted4k(b *testing.B) {
+	insertFromCol(b, 1<<12, true)
+}
+func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted16k(b *testing.B) {
+	insertFromCol(b, 1<<14, true)
+}
+
+func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted64k(b *testing.B) {
+	insertFromCol(b, 1<<17, true)
 }

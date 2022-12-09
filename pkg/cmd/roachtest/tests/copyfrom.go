@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/stretchr/testify/require"
 )
@@ -91,12 +92,12 @@ func initTest(ctx context.Context, t test.Test, c cluster.Cluster, sf int) {
 		); err != nil {
 			t.Fatal(err)
 		}
-		_ = c.RunE(ctx, c.Node(1), "sudo -u postgres createuser roachtest")
-		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "ALTER USER roachtest password 'secret'"`)
-		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT ALL ON SCHEMA public TO roachtest"`)
-		_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT pg_read_server_files TO roachtest"`)
-		// user may already exist so ignore error
 	}
+	_ = c.RunE(ctx, c.Node(1), "sudo -u postgres createuser roachtest")
+	_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "ALTER USER roachtest password 'secret'"`)
+	_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT ALL ON SCHEMA public TO roachtest"`)
+	_ = c.RunE(ctx, c.Node(1), `sudo -u postgres psql -c "GRANT pg_read_server_files TO roachtest"`)
+	// user may already exist so ignore error
 	csv := fmt.Sprintf(tpchLineitemFmt, sf)
 	c.Run(ctx, c.Node(1), "rm -f /tmp/lineitem-table.csv")
 	c.Run(ctx, c.Node(1), fmt.Sprintf("curl '%s' -o /tmp/lineitem-table.csv", csv))
@@ -116,13 +117,13 @@ func runTest(ctx context.Context, t test.Test, c cluster.Cluster, docopy func() 
 
 	det, err = c.RunWithDetailsSingleNode(ctx, t.L(), c.Node(1), "wc -c /tmp/lineitem-table.csv")
 	require.NoError(t, err)
-	var bytes float64
+	var bytes int64
 	_, err = fmt.Sscan(det.Stdout, &bytes)
 	require.NoError(t, err)
 
 	rate := int(float64(rows) / dur.Seconds())
-	dataRate := bytes / 1024 / 1024 / dur.Seconds()
-	t.L().Printf("results: %d rows/s, %.2f mb/s", rate, dataRate)
+	dataRate := float64(bytes) / 1024 / 1024 / dur.Seconds()
+	t.L().Printf("results: %d rows/s, %s", rate, humanizeutil.DataRate(bytes, dur))
 	// Write the copy rate into the stats.json file to be used by roachperf.
 	c.Run(ctx, c.Node(1), "mkdir", t.PerfArtifactsDir())
 	cmd := fmt.Sprintf(
@@ -134,7 +135,7 @@ func runTest(ctx context.Context, t test.Test, c cluster.Cluster, docopy func() 
 
 func runCopyFromPG(ctx context.Context, t test.Test, c cluster.Cluster, sf int, freeze bool) {
 	initTest(ctx, t, c, sf)
-	db, err := sql.Open("postgres", "database=postgres sslmode=disable user=roachtest password=secret host=localhost port=5433")
+	db, err := sql.Open("postgres", "database=postgres sslmode=disable user=roachtest password=secret host=localhost port=5432")
 	if err != nil {
 		panic(err)
 	}
