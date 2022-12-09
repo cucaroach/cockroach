@@ -398,12 +398,12 @@ func (c *copyDataReader) Read(p []byte) (int, error) {
 		if toRead > len(p) {
 			toRead = len(p)
 		}
-		n, err := c.r.Read(p[:toRead])
+		read, err := c.r.Read(p[:toRead])
 		if err == nil {
-			c.stillToRead -= n
+			c.stillToRead -= read
 		}
-		c.byteCount += int64(n)
-		return n, err
+		c.byteCount += int64(read)
+		return read, err
 	}
 	// Keep trying while there's room left.
 	for n < len(p) {
@@ -456,9 +456,9 @@ func (c *copyMachine) run(ctx context.Context) error {
 	}
 
 	// Read from the connection until we see an ClientMsgCopyDone.
-	copyDataReader := copyDataReader{r: c.conn.Rd(), maxMessageSize: int(pgwirebase.ReadBufferMaxMessageSizeClusterSetting.Get(&c.p.execCfg.Settings.SV))}
+	cdr := copyDataReader{r: c.conn.Rd(), maxMessageSize: int(pgwirebase.ReadBufferMaxMessageSizeClusterSetting.Get(&c.p.execCfg.Settings.SV))}
 	// Wrap copyDataReader in a bufio.Reader so we can accumulate lots of small CopyData segments
-	r := bufio.NewReaderSize(&copyDataReader, 1<<16)
+	r := bufio.NewReaderSize(&cdr, 1<<16)
 	readFn := c.readBinaryRow
 
 	switch c.format {
@@ -484,7 +484,7 @@ func (c *copyMachine) run(ctx context.Context) error {
 			return err
 		}
 		if row%copyBatchRowSize == 0 {
-			log.Warningf(ctx, "copy inc rate: %s", humanizeutil.DataRate(copyDataReader.byteCount, c.insertDuration))
+			log.Warningf(ctx, "copy inc rate: %s", humanizeutil.DataRate(cdr.byteCount, c.insertDuration))
 			if err := c.processRows(ctx, false); err != nil {
 				return err
 			}
@@ -496,7 +496,7 @@ func (c *copyMachine) run(ctx context.Context) error {
 			return err
 		}
 	}
-	log.Warningf(ctx, "copy rate: %s", humanizeutil.DataRate(copyDataReader.byteCount, c.insertDuration))
+	log.Warningf(ctx, "copy rate: %s", humanizeutil.DataRate(cdr.byteCount, c.insertDuration))
 
 	/*
 	   Loop:
