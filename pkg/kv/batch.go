@@ -443,7 +443,7 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 			Key: key,
 		}
 		put.Value = v
-		reqs[i] = &puts[i]
+		reqs[i] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	}
 	b.appendReqs(reqs...)
@@ -473,7 +473,7 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 		}
 		put.Value = v
 		put.FailOnTombstones = failOnTombstones
-		reqs[i] = &puts[i]
+		reqs[i] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	}
 	b.appendReqs(reqs...)

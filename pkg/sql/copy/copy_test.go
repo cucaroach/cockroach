@@ -58,6 +58,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -1131,6 +1132,7 @@ func encodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, b *kv.Batch,
 
 }
 
+// Build kv batches where we have a fixed number of rows and do PK and each index.
 func buildKVBatchesFromVecs(ctx context.Context, batchSize int, txn *kv.Txn, numRows int, rh *row.RowHelper, colMap catalog.TableColMap,
 	vecHandlers []tree.ValueHandler, sort bool) ([]*kv.Batch, error) {
 	var batches []*kv.Batch
@@ -1154,6 +1156,7 @@ func buildKVBatchesFromVecs(ctx context.Context, batchSize int, txn *kv.Txn, num
 	}
 	return batches, nil
 }
+
 func BenchmarkCopyFromTPCHSF1_1KVBuildFromCol(b *testing.B) {
 	ctx := context.Background()
 	defer leaktest.AfterTest(b)()
@@ -1200,7 +1203,7 @@ func BenchmarkCopyFromTPCHSF1_1KVBuildFromCol(b *testing.B) {
 	b.SetBytes(int64(datalen))
 }
 
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromDatum(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromDatum(b *testing.B) {
 	ctx := context.Background()
 	defer leaktest.AfterTest(b)()
 	defer log.Scope(b).Close(b)
@@ -1246,14 +1249,10 @@ func BenchmarkCopyFromTPCHSF1_1KVInsertFromDatum(b *testing.B) {
 			}
 		}
 	}
-	b.ResetTimer()
-	for _, batch := range batches {
-		err = txn.Run(ctx, batch)
+
+	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
 		require.NoError(b, err)
 	}
-	err = txn.Commit(ctx)
-	require.NoError(b, err)
-	b.SetBytes(int64(datalen))
 }
 
 func insertFromCol(b *testing.B, batchSize int, sorted bool) {
@@ -1308,30 +1307,140 @@ func insertFromCol(b *testing.B, batchSize int, sorted bool) {
 	batches, err := buildKVBatchesFromVecs(ctx, batchSize, txn, len(records), &rh, colIDToRowIndex, vecHandlers, sorted)
 	require.NoError(b, err)
 
-	b.ResetTimer()
-	for _, batch := range batches {
-		err = txn.Run(ctx, batch)
+	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
 		require.NoError(b, err)
 	}
-	err = txn.Commit(ctx)
-	require.NoError(b, err)
-	b.SetBytes(int64(datalen))
 }
 
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromCol(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromCol(b *testing.B) {
 	insertFromCol(b, 1<<10, false)
 }
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromColSorted(b *testing.B) {
 	insertFromCol(b, 1<<10, true)
 }
 
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted4k(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromColSorted4k(b *testing.B) {
 	insertFromCol(b, 1<<12, true)
 }
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted16k(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromColSorted16k(b *testing.B) {
 	insertFromCol(b, 1<<14, true)
 }
 
-func BenchmarkCopyFromTPCHSF1_1KVInsertFromColSorted64k(b *testing.B) {
-	insertFromCol(b, 1<<17, true)
+func BenchmarkCopyFromTPCHSF1_1InsertFromColSorted64k(b *testing.B) {
+	insertFromCol(b, 1<<16, true)
+}
+
+// Build kv batches where we do all PK first and then move to each index and cut off each batch at command limit.
+func buildFullKVBatchesFromVecs(ctx context.Context, batchSize, limit int, txn *kv.Txn, numRows int, rh *row.RowHelper, colMap catalog.TableColMap,
+	vecHandlers []tree.ValueHandler, sort bool) ([]*kv.Batch, error) {
+	var batches []*kv.Batch
+	batch := txn.NewBatch()
+	batches = append(batches, batch)
+	for i := 0; i < numRows; i += batchSize {
+		thisBatchSize := batchSize
+		if i+batchSize > numRows {
+			thisBatchSize = numRows - i
+		}
+		if err := encodePK(ctx, rh, batch, rh.TableDesc, rh.TableDesc.GetPrimaryIndex(), vecHandlers, colMap, i, thisBatchSize); err != nil {
+			return nil, err
+		}
+		if bytes := batch.ApproximateMutationBytes(); bytes > limit {
+			batch = txn.NewBatch()
+			batches = append(batches, batch)
+		}
+	}
+
+	for i := 0; i < numRows; i += batchSize {
+		thisBatchSize := batchSize
+		if i+batchSize > numRows {
+			thisBatchSize = numRows - i
+		}
+		for _, ind := range rh.TableDesc.WritableNonPrimaryIndexes() {
+			if err := encodeSecondaryIndex(ctx, rh, batch, rh.TableDesc, ind, vecHandlers, colMap, i, thisBatchSize, sort); err != nil {
+				return nil, err
+			}
+			if bytes := batch.ApproximateMutationBytes(); bytes > limit {
+				batch = txn.NewBatch()
+				batches = append(batches, batch)
+			}
+		}
+	}
+
+	return batches, nil
+}
+
+func BenchmarkCopyFromTCPCHSF1_1InsertFromColFullCommands(b *testing.B) {
+	ctx := context.Background()
+	defer leaktest.AfterTest(b)()
+	defer log.Scope(b).Close(b)
+	tempDir, cleanup := testutils.TempDir(b)
+	defer cleanup()
+	tsa.StoreSpecs = []base.StoreSpec{{Path: tempDir}}
+	s, db, kvdb := serverutils.StartServer(b, tsa)
+	defer s.Stopper().Stop(ctx)
+	_, err := db.Exec(lineitemURLSchema)
+	require.NoError(b, err)
+	_, err = db.Exec(lineitemIndexes)
+	require.NoError(b, err)
+
+	// TODO: explore the relationship between kv batch size and
+	// this setting and rope in KV.
+	// kvcoord.TrackedWritesMaxSize.Override(ctx, &tsa.SV, 1<<20)
+	// kvserver.MaxCommandSize.Override(ctx, &tsa.SV, 512<<20)
+
+	var datalen int
+	path, err := filepath.Abs("lineitem.tbl.1")
+	require.NoError(b, err)
+	data, err := os.ReadFile(path)
+	require.NoError(b, err)
+	datalen = len(data)
+	records, err := readAll(data)
+	require.NoError(b, err)
+
+	var vecHandlers = make([]tree.ValueHandler, len(typs))
+	for i, t := range typs {
+		vecHandlers[i] = vec.MakeHandler(t, len(records))
+	}
+	var ph pgdate.ParseHelper
+
+	for _, r := range records {
+		for col, f := range r {
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
+			if err != nil {
+				require.NoError(b, err)
+			}
+		}
+	}
+	desc := desctestutils.TestingGetTableDescriptor(kvdb, codec, "defaultdb", "public", "lineitem")
+	require.NoError(b, err)
+	txn := kvdb.NewTxn(ctx, "copybench")
+	colIDToRowIndex := row.ColIDtoRowIndexFromCols(desc.PublicColumns())
+	var metrics *rowinfra.Metrics
+	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), &st.SV, false, metrics)
+	rh.PrimaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(rh.Codec, rh.TableDesc.GetID(), rh.TableDesc.GetPrimaryIndexID())
+	batches, err := buildFullKVBatchesFromVecs(ctx, 10<<10, 21*(1<<20), txn, len(records), &rh, colIDToRowIndex, vecHandlers, true)
+	require.NoError(b, err)
+
+	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
+		require.NoError(b, err)
+	}
+}
+
+func doBatches(ctx context.Context, b *testing.B, txn *kv.Txn, batches []*kv.Batch, datalen int) error {
+	b.ResetTimer()
+	for _, batch := range batches {
+		start := timeutil.Now()
+		bytes := batch.ApproximateMutationBytes()
+		if err := txn.Run(ctx, batch); err != nil {
+			return err
+		}
+		fmt.Printf("txn.Run batch of %d bytes at %s\n", bytes, humanizeutil.DataRate(int64(bytes), time.Since(start)))
+	}
+	start := timeutil.Now()
+	if err := txn.Commit(ctx); err != nil {
+		return err
+	}
+	fmt.Printf("txn.Commit in %s\n", humanizeutil.Duration(time.Since(start)))
+	b.SetBytes(int64(datalen))
+	return nil
 }
