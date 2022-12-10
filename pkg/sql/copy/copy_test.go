@@ -610,7 +610,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseBatch(b *testing.B) {
 
 	batch := coldata.NewMemBatchWithCapacity(typs, 1024, coldata.StandardColumnFactory)
 	var vecHandlers = make([]tree.ValueHandler, len(typs))
-	for i, _ := range typs {
+	for i := range typs {
 		vecHandlers[i] = vec.MakeBatchHandler(batch, i)
 	}
 
@@ -789,7 +789,6 @@ func valuesideEncodeCol(appendTo []byte, typ *types.T, colID valueside.ColumnIDD
 	}
 
 	panic(false)
-	return nil, nil
 }
 
 func colencodingEncodeKey(b []byte, typ *types.T, dir encoding.Direction, vec tree.ValueHandler, row int) []byte {
@@ -1369,7 +1368,7 @@ func buildFullKVBatchesFromVecs(ctx context.Context, batchSize, limit int, txn *
 	return batches, nil
 }
 
-func BenchmarkCopyFromTCPCHSF1_1InsertFromColFullCommands(b *testing.B) {
+func BenchmarkCopyFromTPCHSF1_1InsertFromColFullCommands(b *testing.B) {
 	ctx := context.Background()
 	defer leaktest.AfterTest(b)()
 	defer log.Scope(b).Close(b)
