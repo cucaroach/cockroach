@@ -435,6 +435,7 @@ func BenchmarkCopyFromTPCHSF1_1ParseCSV(b *testing.B) {
 	csvReader.ReuseRecord = true
 	csvReader.Comma = '|'
 	csvReader.FieldsPerRecord = 17
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rows := 0
@@ -490,13 +491,12 @@ func BenchmarkCopyFromTPCHSF1_1ParseDatum(b *testing.B) {
 	csvReader.FieldsPerRecord = len(typs)
 	records, err := csvReader.ReadAll()
 	require.NoError(b, err)
+
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for _, r := range records {
-			for col, f := range r {
-				_, _, err := tree.ParseAndRequireString(typs[col], f.String(), pctx)
-				require.NoError(b, err)
-			}
+	for _, r := range records {
+		for col, f := range r {
+			_, _, err := tree.ParseAndRequireString(typs[col], f.String(), pctx)
+			require.NoError(b, err)
 		}
 	}
 	b.SetBytes(int64(len(data)))
@@ -523,20 +523,18 @@ func BenchmarkCopyFromTPCHSF1_1ParseCol(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for row, r := range records {
-			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &pgdate.ParseHelper{})
-				if err != nil {
-					require.NoError(b, err)
-				}
+	for row, r := range records {
+		for col, f := range r {
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &pgdate.ParseHelper{})
+			if err != nil {
+				require.NoError(b, err)
 			}
-			// The Datum version throws away each Datum, to make it fair, throw
-			// away after 1024 rows which is default batch size.
-			if (row+1)%colBatchSize == 0 {
-				for _, v := range vecHandlers {
-					v.Reset()
-				}
+		}
+		// The Datum version throws away each Datum, to make it fair, throw
+		// away after 1024 rows which is default batch size.
+		if (row+1)%colBatchSize == 0 {
+			for _, v := range vecHandlers {
+				v.Reset()
 			}
 		}
 	}
@@ -565,20 +563,18 @@ func BenchmarkCopyFromTPCHSF1_1ParseColEx(b *testing.B) {
 	var ph pgdate.ParseHelper
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for row, r := range records {
-			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
-				if err != nil {
-					require.NoError(b, err)
-				}
+	for row, r := range records {
+		for col, f := range r {
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
+			if err != nil {
+				require.NoError(b, err)
 			}
-			// The Datum version throws away each Datum, to make it fair, throw
-			// away after 1024 rows which is default batch size.
-			if (row+1)%colBatchSize == 0 {
-				for _, v := range vecHandlers {
-					v.Reset()
-				}
+		}
+		// The Datum version throws away each Datum, to make it fair, throw
+		// away after 1024 rows which is default batch size.
+		if (row+1)%colBatchSize == 0 {
+			for _, v := range vecHandlers {
+				v.Reset()
 			}
 		}
 	}
@@ -615,21 +611,20 @@ func BenchmarkCopyFromTPCHSF1_1ParseBatch(b *testing.B) {
 	}
 
 	var ph pgdate.ParseHelper
+
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for row, r := range records {
-			// The Datum version throws away each Datum, to make it fair, throw
-			// away after 1024 rows which is the batch size.
-			if (row+1)%1024 == 0 {
-				for _, v := range vecHandlers {
-					v.Reset()
-				}
+	for row, r := range records {
+		// The Datum version throws away each Datum, to make it fair, throw
+		// away after 1024 rows which is the batch size.
+		if (row+1)%1024 == 0 {
+			for _, v := range vecHandlers {
+				v.Reset()
 			}
-			for col, f := range r {
-				err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
-				if err != nil {
-					require.NoError(b, err)
-				}
+		}
+		for col, f := range r {
+			err := tree.ParseAndRequireStringEx(typs[col], f.String(), pctx, vecHandlers[col], &ph)
+			if err != nil {
+				require.NoError(b, err)
 			}
 		}
 	}
@@ -726,17 +721,16 @@ func BenchmarkCopyFromTPCHSF1_1KVBuildFromDatum(b *testing.B) {
 	txn := kvdb.NewTxn(ctx, "copybench")
 	const batchSize = 100
 	batches := make([]*kv.Batch, 0, rc.Len()/batchSize)
+
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		inserter, err := row.MakeInserter(ctx, txn, keys.SystemSQLCodec, tblDesc, tblDesc.PublicColumns(), nil, &st.SV, false, nil)
-		require.NoError(b, err)
-		batch := txn.NewBatch()
-		for r := 0; r < rc.Len(); r++ {
-			inserter.InsertRow(ctx, batch, rc.At(r), pm, false, false)
-			if (r+1)%batchSize == 0 {
-				batches = append(batches, batch)
-				batch = txn.NewBatch()
-			}
+	inserter, err := row.MakeInserter(ctx, txn, keys.SystemSQLCodec, tblDesc, tblDesc.PublicColumns(), nil, &st.SV, false, nil)
+	require.NoError(b, err)
+	batch := txn.NewBatch()
+	for r := 0; r < rc.Len(); r++ {
+		inserter.InsertRow(ctx, batch, rc.At(r), pm, false, false)
+		if (r+1)%batchSize == 0 {
+			batches = append(batches, batch)
+			batch = txn.NewBatch()
 		}
 	}
 	b.SetBytes(int64(datalen))
@@ -1196,6 +1190,7 @@ func BenchmarkCopyFromTPCHSF1_1KVBuildFromCol(b *testing.B) {
 	colIDToRowIndex := row.ColIDtoRowIndexFromCols(desc.PublicColumns())
 	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), &st.SV, false, nil)
 	rh.PrimaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(rh.Codec, rh.TableDesc.GetID(), rh.TableDesc.GetPrimaryIndexID())
+
 	b.ResetTimer()
 	_, err = buildKVBatchesFromVecs(ctx, 1<<10, txn, len(records), &rh, colIDToRowIndex, vecHandlers, false)
 	require.NoError(b, err)
@@ -1236,20 +1231,19 @@ func BenchmarkCopyFromTPCHSF1_1InsertFromDatum(b *testing.B) {
 	txn := kvdb.NewTxn(ctx, "copybench")
 	const batchSize = 100
 	batches := make([]*kv.Batch, 0, rc.Len()/batchSize)
-	{
-		inserter, err := row.MakeInserter(ctx, txn, keys.SystemSQLCodec, tblDesc, tblDesc.PublicColumns(), nil, &st.SV, false, nil)
-		require.NoError(b, err)
-		batch := txn.NewBatch()
-		for i := 0; i < rc.Len(); i++ {
-			inserter.InsertRow(ctx, batch, rc.At(i), pm, false, false)
-			if (i+1)%batchSize == 0 {
-				batches = append(batches, batch)
-				batch = txn.NewBatch()
-			}
+	inserter, err := row.MakeInserter(ctx, txn, keys.SystemSQLCodec, tblDesc, tblDesc.PublicColumns(), nil, &st.SV, false, nil)
+	require.NoError(b, err)
+	batch := txn.NewBatch()
+	for i := 0; i < rc.Len(); i++ {
+		inserter.InsertRow(ctx, batch, rc.At(i), pm, false, false)
+		if (i+1)%batchSize == 0 {
+			batches = append(batches, batch)
+			batch = txn.NewBatch()
 		}
 	}
 
-	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
+	b.ResetTimer()
+	if err := doBatches(ctx, txn, batches, datalen); err != nil {
 		require.NoError(b, err)
 	}
 }
@@ -1306,7 +1300,8 @@ func insertFromCol(b *testing.B, batchSize int, sorted bool) {
 	batches, err := buildKVBatchesFromVecs(ctx, batchSize, txn, len(records), &rh, colIDToRowIndex, vecHandlers, sorted)
 	require.NoError(b, err)
 
-	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
+	b.ResetTimer()
+	if err := doBatches(ctx, txn, batches, datalen); err != nil {
 		require.NoError(b, err)
 	}
 }
@@ -1420,20 +1415,20 @@ func BenchmarkCopyFromTPCHSF1_1InsertFromColFullCommands(b *testing.B) {
 	batches, err := buildFullKVBatchesFromVecs(ctx, 10<<10, 21*(1<<20), txn, len(records), &rh, colIDToRowIndex, vecHandlers, true)
 	require.NoError(b, err)
 
-	if err := doBatches(ctx, b, txn, batches, datalen); err != nil {
+	b.ResetTimer()
+	if err := doBatches(ctx, txn, batches, datalen); err != nil {
 		require.NoError(b, err)
 	}
 }
 
-func doBatches(ctx context.Context, b *testing.B, txn *kv.Txn, batches []*kv.Batch, datalen int) error {
-	b.ResetTimer()
+func doBatches(ctx context.Context, txn *kv.Txn, batches []*kv.Batch, datalen int) error {
 	for _, batch := range batches {
 		start := timeutil.Now()
 		bytes := batch.ApproximateMutationBytes()
 		if err := txn.Run(ctx, batch); err != nil {
 			return err
 		}
-		fmt.Printf("txn.Run batch of %d bytes at %s\n", bytes, humanizeutil.DataRate(int64(bytes), time.Since(start)))
+		fmt.Printf("txn.Run batch of %d appx mut bytes at  %s\n", bytes, humanizeutil.DataRate(int64(bytes), time.Since(start)))
 	}
 	start := timeutil.Now()
 	if err := txn.Commit(ctx); err != nil {
