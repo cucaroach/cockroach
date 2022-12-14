@@ -35,6 +35,7 @@ go_library(
         "//pkg/sql/types",
         "//pkg/util/randident",
         "//pkg/util/randident/randidentcfg",
+        "//pkg/util",
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
