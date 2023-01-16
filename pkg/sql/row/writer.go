@@ -88,7 +88,7 @@ func ColMapping(fromCols, toCols []catalog.Column) []int {
 //   - traceKV is to be set to log the KV operations added to the batch.
 func prepareInsertOrUpdateBatch(
 	ctx context.Context,
-	batch putter,
+	batch Putter,
 	helper *RowHelper,
 	primaryIndexKey []byte,
 	fetchedCols []catalog.Column,
@@ -98,7 +98,7 @@ func prepareInsertOrUpdateBatch(
 	kvKey *roachpb.Key,
 	kvValue *roachpb.Value,
 	rawValueBuf []byte,
-	putFn func(ctx context.Context, b putter, key *roachpb.Key, value *roachpb.Value, traceKV bool),
+	putFn func(ctx context.Context, b Putter, key *roachpb.Key, value *roachpb.Value, traceKV bool),
 	overwrite, traceKV bool,
 ) ([]byte, error) {
 	families := helper.TableDesc.GetFamilies()

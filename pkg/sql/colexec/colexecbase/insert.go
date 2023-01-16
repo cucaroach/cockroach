@@ -57,6 +57,7 @@ func (i *vectorInserter) Next() coldata.Batch {
 	if b.Length() == 0 {
 		return coldata.ZeroBatch
 	}
+	// TODO: do kv trace beneath putter interface
 	// insert rows...
 	i.retBatch.ColVec(0).Int64().Set(0, int64(b.Length()))
 	i.retBatch.SetLength(1)

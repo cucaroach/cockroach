@@ -74,7 +74,7 @@ func MakeInserter(
 // insertCPutFn is used by insertRow when conflicts (i.e. the key already exists)
 // should generate errors.
 func insertCPutFn(
-	ctx context.Context, b putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
+	ctx context.Context, b Putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
 ) {
 	// TODO(dan): We want do this V(2) log everywhere in sql. Consider making a
 	// client.Batch wrapper instead of inlining it everywhere.
@@ -86,7 +86,7 @@ func insertCPutFn(
 
 // insertPutFn is used by insertRow when conflicts should be ignored.
 func insertPutFn(
-	ctx context.Context, b putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
+	ctx context.Context, b Putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
 ) {
 	if traceKV {
 		log.VEventfDepth(ctx, 1, 2, "Put %s -> %s", *key, value.PrettyPrint())
@@ -95,7 +95,7 @@ func insertPutFn(
 }
 
 // insertDelFn is used by insertRow to delete existing rows.
-func insertDelFn(ctx context.Context, b putter, key *roachpb.Key, traceKV bool) {
+func insertDelFn(ctx context.Context, b Putter, key *roachpb.Key, traceKV bool) {
 	if traceKV {
 		log.VEventfDepth(ctx, 1, 2, "Del %s", *key)
 	}
@@ -104,7 +104,7 @@ func insertDelFn(ctx context.Context, b putter, key *roachpb.Key, traceKV bool) 
 
 // insertPutFn is used by insertRow when conflicts should be ignored.
 func insertInvertedPutFn(
-	ctx context.Context, b putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
+	ctx context.Context, b Putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
 ) {
 	if traceKV {
 		log.VEventfDepth(ctx, 1, 2, "InitPut %s -> %s", *key, value.PrettyPrint())
@@ -112,18 +112,22 @@ func insertInvertedPutFn(
 	b.InitPut(key, value, false)
 }
 
-type putter interface {
+type Putter interface {
 	CPut(key, value interface{}, expValue []byte)
 	Put(key, value interface{})
 	InitPut(key, value interface{}, failOnTombstones bool)
 	Del(key ...interface{})
+
+	CPutTuples(kys []roachpb.Key, values [][]byte)
+	PutBytes(kys []roachpb.Key, values [][]byte)
+	InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool)
 }
 
 // InsertRow adds to the batch the kv operations necessary to insert a table row
 // with the given values.
 func (ri *Inserter) InsertRow(
 	ctx context.Context,
-	b putter,
+	b Putter,
 	values []tree.Datum,
 	pm PartialIndexUpdateHelper,
 	overwrite bool,
