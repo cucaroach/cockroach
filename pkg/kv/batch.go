@@ -430,13 +430,16 @@ func (b *Batch) Put(key, value interface{}) {
 func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.Request, len(keys))
 	puts := make([]roachpb.PutRequest, len(keys))
-	var v roachpb.Value
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
 	for i, key := range keys {
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
 		}
+		var v roachpb.Value
 		v.SetBytes(values[i])
 		v, err = marshalValue(&v)
 		if err != nil {
@@ -450,21 +453,24 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 		put.Value = v
 		reqs[i] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
 	}
 	b.appendReqs(reqs...)
-	b.initResult(len(reqs), len(reqs), notRaw, nil)
 }
 
 func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombstones bool) {
 	reqs := make([]roachpb.Request, len(keys))
 	puts := make([]roachpb.InitPutRequest, len(keys))
-	var v roachpb.Value
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
 	for i, key := range keys {
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
 		}
+		var v roachpb.Value
 		v.SetBytes(values[i])
 		v, err = marshalValue(&v)
 		if err != nil {
@@ -480,9 +486,9 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 		put.FailOnTombstones = failOnTombstones
 		reqs[i] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
 	}
 	b.appendReqs(reqs...)
-	b.initResult(len(reqs), len(reqs), notRaw, nil)
 }
 
 // PutInline sets the value for a key, but does not maintain
@@ -571,13 +577,16 @@ func (b *Batch) cputInternal(
 func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.Request, len(keys))
 	puts := make([]roachpb.ConditionalPutRequest, len(keys))
-	var v roachpb.Value
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
 	for i, key := range keys {
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
 			return
 		}
+		var v roachpb.Value
 		v.SetTuple(values[i])
 		v, err = marshalValue(&v)
 		if err != nil {
@@ -591,9 +600,9 @@ func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 		put.Value = v
 		reqs[i] = &puts[i]
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
 	}
 	b.appendReqs(reqs...)
-	b.initResult(len(reqs), len(reqs), notRaw, nil)
 }
 
 // InitPut sets the first value for a key to value. An ConditionFailedError is
