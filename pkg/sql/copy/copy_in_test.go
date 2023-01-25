@@ -13,6 +13,7 @@ package copy_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"net/url"
 	"reflect"

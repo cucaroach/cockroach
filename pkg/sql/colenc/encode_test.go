@@ -269,6 +269,6 @@ func TestColIDToRowIndexNull(t *testing.T) {
 
 }
 
-// TODO: enforceLocalColumnConstraints error
+// TODO: partial indexes
 // TODO: checkMutationInput
 // TODO: tryDoResponseAdmission

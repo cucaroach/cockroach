@@ -499,3 +499,13 @@ COPY tab_child FROM STDIN
 'tower'	'former'	'mainly'	'point'	'class'	'idea'
 ----
 ERROR: insert on table "tab_child" violates foreign key constraint "tab_child_col5_col6_fkey" (SQLSTATE 23503)
+
+exec-ddl
+CREATE TABLE tabnn (i INT NOT NULL)
+----
+
+copy-error
+COPY tabnn FROM STDIN
+\N
+----
+ERROR: null value in column "i" violates not-null constraint (SQLSTATE 23502)

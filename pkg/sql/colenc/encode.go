@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/valueside"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
@@ -356,6 +357,9 @@ func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog
 			vec := vecs[idx]
 			for row := 0; row < count; row++ {
 				if vec.Nulls().NullAt(row) {
+					if !col.IsNullable() {
+						return sqlerrors.NewNonNullViolationError(col.GetName())
+					}
 					continue
 				}
 				if lastColIDs[row] > colID {

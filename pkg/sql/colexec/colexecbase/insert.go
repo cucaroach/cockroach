@@ -85,5 +85,9 @@ func (i *vectorInserter) Next() coldata.Batch {
 	}
 	i.retBatch.ColVec(0).Int64().Set(0, int64(b.Length()))
 	i.retBatch.SetLength(1)
+
+	// FIXME: Possibly initiate a run of CREATE STATISTICS.
+	// params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc, len(n.input))
+
 	return i.retBatch
 }

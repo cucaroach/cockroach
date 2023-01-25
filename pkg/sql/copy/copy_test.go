@@ -130,6 +130,9 @@ func TestCopy(t *testing.T) {
 		}
 
 	}
+
+	// TODO(cucaroach): run this for vectorize=on and vectorize=off, atomic and
+	// non-atomic.
 	datadriven.RunTest(t, datapathutils.TestDataPath(t, "copyfrom"), testCopy)
 }
 
