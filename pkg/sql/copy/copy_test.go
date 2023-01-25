@@ -98,6 +98,7 @@ func TestCopy(t *testing.T) {
 				require.NoError(t, err, "%s\n%s\n", d.Cmd, d.Input)
 				require.Equal(t, int(rows), len(lines)-1, "Not all rows were inserted")
 			} else {
+				require.Error(t, err, "copy-error didn't return and error!")
 				return err.Error()
 			}
 			return fmt.Sprintf("%d", rows)

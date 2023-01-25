@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -37,9 +38,9 @@ func isLiteralValues(values *tree.ValuesClause) bool {
 	return true
 }
 
-func buildVectorRows(values *tree.ValuesClause, desiredTypes []*types.T) tree.ExprContainer {
-	batch := coldata.NewMemBatchWithCapacity(desiredTypes, len(values.Rows), coldata.StandardColumnFactory)
-
+func (b *Builder) buildVectorRows(values *tree.ValuesClause, desiredTypes []*types.T) tree.ExprContainer {
+	factory := coldataext.NewExtendedColumnFactory(b.evalCtx)
+	batch := coldata.NewMemBatchWithCapacity(desiredTypes, len(values.Rows), factory)
 	return tree.VectorRows{Batch: batch}
 }
 
@@ -52,12 +53,16 @@ func (b *Builder) buildValuesClause(
 	values *tree.ValuesClause, desiredTypes []*types.T, inScope *scope,
 ) (outScope *scope) {
 
-	// In order to test vector inserts lets see if we can build a literal values.
-	// TODO: if testing_vector_insert = on
-	if isLiteralValues(values) {
-		literalValues := &tree.LiteralValuesClause{Rows: buildVectorRows(values, desiredTypes)}
-		return b.buildLiteralValuesClause(literalValues, desiredTypes, inScope)
-	}
+	// In order to test vector inserts see if we can build a literal values.
+	// TODO(cucaroach): if testing_vector_insert = on. Want hidden, maybe
+	// env var? Right now this doesn't work because its too early to tell
+	// if we can actually execute an insert with a vectorRows.  Leaving in
+	// for reviewers to ponder...
+
+	// if isLiteralValues(values) {
+	// 	literalValues := &tree.LiteralValuesClause{Rows: b.buildVectorRows(values, desiredTypes)}
+	// 	return b.buildLiteralValuesClause(literalValues, desiredTypes, inScope)
+	// }
 
 	numRows := len(values.Rows)
 	numCols := 0

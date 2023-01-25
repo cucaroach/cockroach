@@ -22,8 +22,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -172,6 +174,7 @@ type ValueHandler interface {
 	JSON(j json.JSON)
 	String(s string)
 	TimestampTZ(t time.Time)
+	Reset()
 }
 
 func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh ValueHandler, ph *pgdate.ParseHelper) (err error) {
@@ -183,7 +186,7 @@ func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh Valu
 		}
 	case types.BytesFamily:
 		var res []byte
-		if res, err = lex.DecodeRawBytesToByteArrayAuto([]byte(s)); err != nil {
+		if res, err = lex.DecodeRawBytesToByteArrayAuto(encoding.UnsafeConvertStringToBytes(s)); err == nil {
 			vh.Bytes(res)
 		} else {
 			err = MakeParseError(s, types.Bytes, err)
@@ -199,7 +202,6 @@ func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh Valu
 		if err = setDecimalString(s, dec); err != nil {
 			// Erase any invalid results.
 			*dec = apd.Decimal{}
-			err = MakeParseError(s, types.Decimal, err)
 		}
 	case types.FloatFamily:
 		var f float64
@@ -233,6 +235,33 @@ func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh Valu
 			if ts, err = checkTimeBounds(ts, TimeFamilyPrecisionToRoundDuration(t.Precision())); err == nil {
 				vh.TimestampTZ(ts)
 			}
+		}
+	case types.TimestampFamily:
+		now := relativeParseTime(ctx)
+		var ts time.Time
+		if ts, _, err = pgdate.ParseTimestampWithoutTimezone(now, dateStyle(ctx), s); err == nil {
+			// Always normalize time to the current location.
+			if ts, err = checkTimeBounds(ts, TimeFamilyPrecisionToRoundDuration(t.Precision())); err == nil {
+				vh.TimestampTZ(ts)
+			}
+		}
+	case types.IntervalFamily:
+		var itm types.IntervalTypeMetadata
+		itm, err = t.IntervalTypeMetadata()
+		if err == nil {
+			var d duration.Duration
+			d, err = ParseIntervalWithTypeMetadata(intervalStyle(ctx), s, itm)
+			if err == nil {
+				vh.Duration(d)
+			}
+		}
+	case types.UuidFamily:
+		var uv uuid.UUID
+		uv, err = uuid.FromString(s)
+		if err == nil {
+			vh.Bytes(uv.GetBytes())
+		} else {
+			err = MakeParseError(s, types.Uuid, err)
 		}
 	default:
 		var d Datum

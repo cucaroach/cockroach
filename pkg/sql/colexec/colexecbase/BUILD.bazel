@@ -19,8 +19,10 @@ go_library(
         "//pkg/col/coldata",
         "//pkg/col/coldataext",  # keep
         "//pkg/col/typeconv",  # keep
+        "//pkg/kv",
         "//pkg/sql/catalog",
         "//pkg/sql/colconv",  # keep
+        "//pkg/sql/colenc",
         "//pkg/sql/colexec/colexecutils",
         "//pkg/sql/colexec/execgen",  # keep
         "//pkg/sql/colexecerror",

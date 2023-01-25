@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 )
@@ -58,7 +59,7 @@ func (v *vecHandler) Null() {
 
 // String is part of the tree.ValueHandler interface.
 func (v *vecHandler) String(s string) {
-	v.col.Bytes().Set(v.row, []byte(s))
+	v.col.Bytes().Set(v.row, encoding.UnsafeConvertStringToBytes(s))
 	v.row++
 }
 

@@ -3307,7 +3307,11 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 		plan, err = dsp.createPlanForIndexJoin(ctx, planCtx, n)
 
 	case *insertNode:
-		plan, err = dsp.createPlanForInsert(ctx, planCtx, n)
+		if planCtx.isVectorInsert {
+			plan, err = dsp.createPlanForInsert(ctx, planCtx, n)
+		} else {
+			plan, err = dsp.wrapPlan(ctx, planCtx, n, false /* allowPartialDistribution */)
+		}
 
 	case *invertedFilterNode:
 		plan, err = dsp.createPlanForInvertedFilter(ctx, planCtx, n)
@@ -3352,11 +3356,16 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 
 	case *rowCountNode:
 		if in, ok := n.source.(*insertNode); ok {
+			var valNode planNode
+			// We support two cases, a render around a values and a straight values.
 			if r, ok := in.source.(*renderNode); ok {
-				if v, ok := r.source.plan.(*valuesNode); ok {
-					if v.coldataBatch != nil {
-						planCtx.isVectorInsert = true
-					}
+				valNode = r.source.plan
+			} else {
+				valNode = in.source
+			}
+			if v, ok := valNode.(*valuesNode); ok {
+				if v.coldataBatch != nil {
+					planCtx.isVectorInsert = true
 				}
 			}
 		}
@@ -4573,6 +4582,8 @@ func (dsp *DistSQLPlanner) finalizePlanWithRowCount(
 	}
 }
 
+// FIXME: this doesn't work and isn't used, ask Yahor if I should bother trying
+// to get it to work.
 func (dsp *DistSQLPlanner) createPlanForRowCount(
 	ctx context.Context, planCtx *PlanningCtx, n *rowCountNode,
 ) (*PhysicalPlan, error) {
@@ -4602,11 +4613,17 @@ func (dsp *DistSQLPlanner) createPlanForInsert(
 	if err != nil {
 		return nil, err
 	}
-	insertSpec := execinfrapb.InsertSpec{}
+	insColIDs := make([]descpb.ColumnID, len(n.run.insertCols))
+	for i, c := range n.run.insertCols {
+		insColIDs[i] = c.GetID()
+	}
+	insertSpec := execinfrapb.InsertSpec{
+		Table:     *n.run.ti.tableDesc().TableDesc(),
+		ColumnIDs: insColIDs,
+	}
 	var typs []*types.T
 	if len(n.columns) > 0 {
-		// TODO: is this for RETURNING clause?
-		panic("unimplemented")
+		panic(errors.AssertionFailedf("distsql insert doesn't support RETURNING"))
 	} else {
 		typs = []*types.T{types.Int}
 	}

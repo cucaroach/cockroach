@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -37,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -147,8 +149,7 @@ type copyMachine struct {
 
 	processRows func(ctx context.Context, finalBatch bool) error
 
-	scratchRow []tree.Datum
-
+	scratchRow    []tree.Datum
 	batch         coldata.Batch
 	valueHandlers []tree.ValueHandler
 	ph            pgdate.ParseHelper
@@ -304,14 +305,16 @@ func newCopyMachine(
 	}
 	c.initMonitoring(ctx, parentMon)
 	c.processRows = c.insertRows
-	if c.p.SessionData().VectorizeMode != sessiondatapb.VectorizeOff {
+
+	if c.canSupportVectorized(tableDesc) {
 		// If we're using the row based default size, swap in bigger vector
 		// default, otherwise use the value as is (random metamorphic).
 		if copyBatchRowSize == CopyBatchRowSizeDefault {
 			copyBatchRowSize = CopyBatchRowSizeVectorDefault
 		}
 		c.vectorized = true
-		c.batch = coldata.NewMemBatchWithCapacity(typs, copyBatchRowSize, coldata.StandardColumnFactory)
+		factory := coldataext.NewExtendedColumnFactory(c.p.EvalContext())
+		c.batch = coldata.NewMemBatchWithCapacity(typs, copyBatchRowSize, factory)
 		c.valueHandlers = make([]tree.ValueHandler, len(typs))
 		for i := range typs {
 			c.valueHandlers[i] = coldataext.MakeVecHandler(c.batch.ColVec(i))
@@ -322,6 +325,22 @@ func newCopyMachine(
 		c.scratchRow = make(tree.Datums, len(c.resultColumns))
 	}
 	return c, nil
+}
+
+func (c *copyMachine) canSupportVectorized(table catalog.TableDescriptor) bool {
+	// TODO(cucaroach): support vectorized binary.
+	if c.format != tree.CopyFormatBinary {
+		if c.p.SessionData().VectorizeMode != sessiondatapb.VectorizeOff {
+			// Vectorized COPY doesn't support foreign key checks, no reason it
+			// couldn't but it doesn't work right now and we
+			// wouldn't want to enable it until we were sure that
+			// all the checks could be vectorized so the
+			// "bufferNode" used doesn't get materialized into a
+			// datum based row container.
+			return len(table.EnforcedOutboundForeignKeys()) == 0 && len(table.CheckConstraints()) == 0
+		}
+	}
+	return false
 }
 
 func (c *copyMachine) numInsertedRows() int {
@@ -514,7 +533,13 @@ func (c *copyMachine) processCopyData(ctx context.Context, data string, final bo
 		}
 	}
 	// Only do work if we have a full batch of rows or this is the end.
-	if ln := c.rows.Len(); !final && (ln == 0 || ln < c.copyBatchRowSize) {
+	var ln int
+	if c.vectorized {
+		ln = c.batch.Length()
+	} else {
+		ln = c.rows.Len()
+	}
+	if !final && (ln == 0 || ln < c.copyBatchRowSize) {
 		return nil
 	}
 	return c.processRows(ctx, final)
@@ -666,14 +691,13 @@ func (c *copyMachine) readCSVTupleVec(ctx context.Context, record []csv.Record) 
 		// to be treated as NULL.
 		if !s.Quoted && s.Val == c.null {
 			vh[i].Null()
-			c.batch.SetLength(c.batch.Length() + 1)
 			continue
 		}
 		if err := tree.ParseAndRequireStringEx(c.resultColumns[i].Typ, s.Val, c.parsingEvalCtx, c.valueHandlers[i], &c.ph); err != nil {
 			return err
 		}
-		c.batch.SetLength(c.batch.Length() + 1)
 	}
+	c.batch.SetLength(c.batch.Length() + 1)
 	return nil
 }
 
@@ -923,7 +947,7 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 
 	var numRows int
 	if c.vectorized {
-		numRows = c.valueHandlers[0].Len()
+		numRows = c.batch.Length()
 	} else {
 		numRows = c.rows.Len()
 	}
@@ -992,7 +1016,17 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 	}
 	c.insertedRows += numRows
 	// We're done reset for next batch.
-	return c.rows.UnsafeReset(ctx)
+	if c.vectorized {
+		c.batch.ResetInternalBatch()
+		for _, vh := range c.valueHandlers {
+			vh.Reset()
+		}
+	} else {
+		if err := c.rows.UnsafeReset(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *copyMachine) maybeIgnoreHiddenColumnsBytes(in [][]byte) [][]byte {
@@ -1071,7 +1105,6 @@ func (c *copyMachine) readTextTupleVec(ctx context.Context, line []byte) error {
 		s := string(part)
 		// Disable NULL conversion during file uploads.
 		if !c.forceNotNull && s == c.null {
-			c.batch.SetLength(c.batch.Length() + 1)
 			c.valueHandlers[i].Null()
 			continue
 		}
@@ -1088,21 +1121,20 @@ func (c *copyMachine) readTextTupleVec(ctx context.Context, line []byte) error {
 			types.TimestampFamily,
 			types.TimestampTZFamily,
 			types.UuidFamily:
+			// TODO(cucaroach): we can probably get rid of some memory allocations here.
 			s = decodeCopy(s)
 		}
-
-		// FIXME:whats going on with Bytes?
-		// var err error
-		// switch c.resultColumns[i].Typ.Family() {
-		// case types.BytesFamily:
-		// 	d = tree.NewDBytes(tree.DBytes(s))
-		// default:
-
-		if err := tree.ParseAndRequireStringEx(c.resultColumns[i].Typ, s, c.parsingEvalCtx, c.valueHandlers[i], &c.ph); err != nil {
-			return err
+		switch c.resultColumns[i].Typ.Family() {
+		case types.BytesFamily:
+			// Bypass DecodeRawBytesToByteArrayAuto, why?
+			c.valueHandlers[i].Bytes(encoding.UnsafeConvertStringToBytes(s))
+		default:
+			if err := tree.ParseAndRequireStringEx(c.resultColumns[i].Typ, s, c.parsingEvalCtx, c.valueHandlers[i], &c.ph); err != nil {
+				return err
+			}
 		}
-		c.batch.SetLength(c.batch.Length() + 1)
 	}
+	c.batch.SetLength(c.batch.Length() + 1)
 	return nil
 }
 

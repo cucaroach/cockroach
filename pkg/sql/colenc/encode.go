@@ -38,12 +38,12 @@ import (
 )
 
 func InsertBatch(ctx context.Context, rh *row.RowHelper, b coldata.Batch, p row.Putter, colMap catalog.TableColMap) error {
-	err := EncodePK(ctx, rh, p, rh.TableDesc, rh.TableDesc.GetPrimaryIndex(), b.ColVecs(), colMap)
+	err := EncodePK(ctx, rh, p, rh.TableDesc, rh.TableDesc.GetPrimaryIndex(), b.Length(), b.ColVecs(), colMap)
 	if err != nil {
 		return err
 	}
 	for _, ind := range rh.TableDesc.WritableNonPrimaryIndexes() {
-		err = EncodeSecondaryIndex(ctx, rh, p, rh.TableDesc, ind, b.ColVecs(), colMap, false)
+		err = EncodeSecondaryIndex(ctx, rh, p, rh.TableDesc, ind, b.Length(), b.ColVecs(), colMap, false)
 		if err != nil {
 			return err
 		}
@@ -178,7 +178,8 @@ func encodeKey(b []byte, typ *types.T, dir encoding.Direction, vec coldata.Vec, 
 }
 
 // encodeKeyCols is the vector version of rowenc.EncodeIndexKey
-func encodeIndexKey(kys []roachpb.Key, count int, vecs []coldata.Vec, keyCols []fetchpb.IndexFetchSpec_KeyColumn, colIDToRowIndex catalog.TableColMap, pkoffsets []int32) error {
+func encodeIndexKey(kys []roachpb.Key, count int, vecs []coldata.Vec, keyCols []fetchpb.IndexFetchSpec_KeyColumn,
+	colIDToRowIndex catalog.TableColMap, pkoffsets []int32, nulls coldata.Nulls) error {
 	for _, k := range keyCols {
 		dir, err := catalogkeys.IndexColumnEncodingDirection(k.Direction)
 		if err != nil {
@@ -188,27 +189,32 @@ func encodeIndexKey(kys []roachpb.Key, count int, vecs []coldata.Vec, keyCols []
 		var vec coldata.Vec
 		if ok {
 			vec = vecs[col]
+		} else {
+			nulls.SetNulls()
 		}
 		for row := 0; row < count; row++ {
 			if kys[row], err = encodeKey(kys[row], k.Type, dir, vec, row); err != nil {
 				return err
 			}
+
 			if pkoffsets != nil {
 				pkoffsets[row] = int32(len(kys[row]))
 			}
+		}
+		if vec.Nulls().MaybeHasNulls() {
+			nulls = nulls.Or(*vec.Nulls())
 		}
 	}
 	return nil
 }
 
 func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog.TableDescriptor,
-	ind catalog.Index, vecs []coldata.Vec,
+	ind catalog.Index, count int, vecs []coldata.Vec,
 	colMap catalog.TableColMap) error {
 
 	keyAndSuffixCols := desc.IndexFetchSpecKeyAndSuffixColumns(ind)
 	keyCols := keyAndSuffixCols[:ind.NumKeyColumns()]
 	fetchedCols := desc.PublicColumns()
-	count := vecs[0].Length()
 	kys := make([]roachpb.Key, count)
 	rowBufSize := 5*len(keyCols) + len(rh.PrimaryIndexKeyPrefix)
 	buffer := make([]byte, 0, count*rowBufSize)
@@ -217,7 +223,7 @@ func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog
 	var pkoffsets []int32
 
 	// Store the index up to the family id so we can reuse the prefixes
-	if len(families) > 0 {
+	if len(families) > 1 {
 		pkoffsets = make([]int32, count)
 	}
 
@@ -228,14 +234,15 @@ func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog
 		kys[row] = append(kys[row], rh.PrimaryIndexKeyPrefix...)
 	}
 
-	if err := encodeIndexKey(kys, count, vecs, keyCols, colMap, pkoffsets); err != nil {
+	var nulls coldata.Nulls
+	if err := encodeIndexKey(kys, count, vecs, keyCols, colMap, pkoffsets, nulls); err != nil {
 		return err
+	}
+	if nulls.MaybeHasNulls() {
+		return rowenc.MakeNullPKError(desc, ind, colMap, nil)
 	}
 
 	for i := range families {
-		// lastColIDs := make([]catid.ColumnID, count)
-		// values := make([]roachpb.Value, count)
-
 		family := &families[i]
 		update := false
 		for _, colID := range family.ColumnIDs {
@@ -252,7 +259,6 @@ func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog
 		if !update && len(family.ColumnIDs) != 0 {
 			continue
 		}
-
 		familySortedColumnIDs, ok := rh.SortedColumnFamily(family.ID)
 		if !ok {
 			return errors.AssertionFailedf("invalid family sorted column id map")
@@ -365,7 +371,7 @@ func EncodePK(ctx context.Context, rh *row.RowHelper, p row.Putter, desc catalog
 			}
 		}
 
-		//TODO: overwrite makes this a plain put
+		//TODO(cucuroach): for updates overwrite makes this a plain put
 		p.CPutTuples(kys, values)
 	}
 
@@ -392,19 +398,18 @@ func (k *KVS) Swap(i, j int) {
 
 func EncodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, p row.Putter,
 	desc catalog.TableDescriptor, ind catalog.Index,
-	vecs []coldata.Vec, colMap catalog.TableColMap, srt bool) error {
+	count int, vecs []coldata.Vec, colMap catalog.TableColMap, srt bool) error {
 	var err error
 	secondaryIndexKeyPrefix := rowenc.MakeIndexKeyPrefix(rh.Codec, desc.GetID(), ind.GetID())
 
 	// Use the primary key encoding for covering indexes.
 	if ind.GetEncodingType() == catenumpb.PrimaryIndexEncoding {
-		return EncodePK(ctx, rh, p, desc, ind, vecs, colMap)
+		return EncodePK(ctx, rh, p, desc, ind, count, vecs, colMap)
 	}
 
 	keyAndSuffixCols := desc.IndexFetchSpecKeyAndSuffixColumns(ind)
 	keyCols := keyAndSuffixCols[:ind.NumKeyColumns()]
 	// TODO: we should re-use these
-	count := vecs[0].Length()
 	kys := make([]roachpb.Key, count)
 	rowBufSize := 5*len(keyCols) + len(secondaryIndexKeyPrefix)
 	buffer := make([]byte, 0, count*rowBufSize)
@@ -420,19 +425,19 @@ func EncodeSecondaryIndex(ctx context.Context, rh *row.RowHelper, p row.Putter,
 		return err
 	}
 
-	var containsNull coldata.Nulls
+	var nulls coldata.Nulls
 	if ind.GetType() == descpb.IndexDescriptor_INVERTED {
 		// Since the inverted indexes generate multiple keys per row just handle them
 		// separately.
 		return encodeInvertedSecondaryIndex(kys, ind, vecs, colMap, p, extraKeys)
 	} else {
-		if err := encodeIndexKey(kys, count, vecs, keyCols, colMap, nil); err != nil {
+		if err := encodeIndexKey(kys, count, vecs, keyCols, colMap, nil, nulls); err != nil {
 			return err
 		}
 	}
 
 	for rowoffset := 0; rowoffset < count; rowoffset++ {
-		if !ind.IsUnique() || containsNull.NullAt(rowoffset) {
+		if !ind.IsUnique() || nulls.NullAtChecked(rowoffset) {
 			kys[rowoffset] = append(kys[rowoffset], extraKeys[rowoffset]...)
 		}
 		// TODO: secondary index family support

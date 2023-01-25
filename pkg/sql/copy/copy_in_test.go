@@ -8,12 +8,11 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package sql_test
+package copy_test
 
 import (
 	"context"
 	"fmt"
-	"math"
 	"math/rand"
 	"net/url"
 	"reflect"
@@ -778,7 +777,7 @@ func TestCopyInReleasesLeases(t *testing.T) {
 		s.ServingSQLAddr(), t.Name(), url.UserPassword("foo", "testabc"),
 		false /* withClientCerts */)
 	defer cleanupFn()
-	conn, err := pgxConn(t, userURL)
+	conn, err := sql.PgxConn(t, userURL)
 	require.NoError(t, err)
 
 	rowsAffected, err := conn.CopyFrom(

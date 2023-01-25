@@ -12,6 +12,8 @@ package sql
 
 import (
 	"context"
+	"net/url"
+	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -31,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
+	"github.com/jackc/pgx/v4"
 )
 
 // CreateTestTableDescriptor converts a SQL string to a table for test purposes.
@@ -193,4 +196,14 @@ func (dsp *DistSQLPlanner) ExecLocalAll(
 		return &factoryEvalCtx
 	}
 	return dsp.PlanAndRunAll(ctx, evalCtx, planCtx, p, recv, evalCtxFactory)
+}
+
+// PgxConn is a helper to create a pgx.Conn from a url.
+func PgxConn(t *testing.T, connURL url.URL) (*pgx.Conn, error) {
+	t.Helper()
+	pgxConfig, err := pgx.ParseConfig(connURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pgx.ConnectConfig(context.Background(), pgxConfig)
 }

@@ -1092,4 +1092,8 @@ message HashGroupJoinerSpec {
 // rows or inserts from select).
 message InsertSpec {
   optional sqlbase.TableDescriptor table = 1 [(gogoproto.nullable) = false];
+  repeated uint32 column_ids = 2 [
+    (gogoproto.customname) = "ColumnIDs",
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.ColumnID"
+  ];
 }

@@ -4,6 +4,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_test")
 go_test(
     name = "copy_test",
     srcs = [
+        "copy_in_test.go",
         "copy_test.go",
         "main_test.go",
     ],
@@ -18,6 +19,11 @@ go_test(
         "//pkg/server",
         "//pkg/settings/cluster",
         "//pkg/sql",
+        "//pkg/sql/randgen",
+        "//pkg/sql/sem/tree",
+        "//pkg/sql/tests",
+        "//pkg/sql/types",
+        "//pkg/testutils",
         "//pkg/testutils/datapathutils",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/sqlutils",
@@ -25,9 +31,13 @@ go_test(
         "//pkg/util/leaktest",
         "//pkg/util/log",
         "//pkg/util/randutil",
+        "//pkg/util/timeofday",
+        "//pkg/util/timetz",
         "@com_github_cockroachdb_apd_v3//:apd",
         "@com_github_cockroachdb_datadriven//:datadriven",
         "@com_github_jackc_pgtype//:pgtype",
+        "@com_github_jackc_pgx_v4//:pgx",
+        "@com_github_lib_pq//:pq",
         "@com_github_stretchr_testify//require",
     ],
 )

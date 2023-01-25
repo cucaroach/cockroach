@@ -49,12 +49,16 @@ func TestEncoderEquality(t *testing.T) {
 	s, db, kvdb := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 
+	db.Exec("CREATE TYPE c AS (a INT, b INT)")
 	rng, _ := randutil.NewTestRand()
 	sv := &s.ClusterSettings().SV
 	for _, tc := range []struct {
 		ddl    string
 		datums tree.Datums
 	}{
+		// I'm not doing this right, it crashes in the row encoder...
+		//{"i INT PRIMARY KEY, c c", []tree.Datum{tree.NewDInt(1234), tree.NewDTupleWithLen(types.Int, 2)}},
+		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
 		{"i INT PRIMARY KEY, j JSON, INVERTED INDEX (j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json)}},
 		// Key encoding of vector types, both directions
 		{"b BOOL, PRIMARY KEY (b ASC)", []tree.Datum{tree.DBoolFalse}},
@@ -68,11 +72,13 @@ func TestEncoderEquality(t *testing.T) {
 		{"d DECIMAL, PRIMARY KEY (d ASC)", []tree.Datum{&tree.DDecimal{Decimal: *apd.New(123, 2)}}},
 		{"d DECIMAL, PRIMARY KEY (d DESC)", []tree.Datum{&tree.DDecimal{Decimal: *apd.New(123, 2)}}},
 
-		{"b BYTES, PRIMARY KEY (b ASC)", []tree.Datum{tree.NewDBytes("ASDF")}},
-		{"b BYTES, PRIMARY KEY (b DESC)", []tree.Datum{tree.NewDBytes("ASDF")}},
+		{"b BYTES, PRIMARY KEY (b ASC)", []tree.Datum{randgen.RandDatum(rng, types.Bytes, false)}},
+		{"b BYTES, PRIMARY KEY (b DESC)", []tree.Datum{randgen.RandDatum(rng, types.Bytes, false)}},
 
-		{"s STRING, PRIMARY KEY (s ASC)", []tree.Datum{tree.NewDString("ASDF")}},
-		{"s STRING, PRIMARY KEY (s DESC)", []tree.Datum{tree.NewDString("ASDF")}},
+		{"i INT PRIMARY KEY, b BYTES", []tree.Datum{tree.NewDInt(1234), randgen.RandDatum(rng, types.Bytes, true)}},
+
+		{"s STRING, PRIMARY KEY (s ASC)", []tree.Datum{randgen.RandDatumSimple(rng, types.String)}},
+		{"s STRING, PRIMARY KEY (s DESC)", []tree.Datum{randgen.RandDatumSimple(rng, types.String)}},
 
 		{"u UUID, PRIMARY KEY (u ASC)", []tree.Datum{randgen.RandDatumSimple(rng, types.Uuid)}},
 		{"u UUID, PRIMARY KEY (u DESC)", []tree.Datum{randgen.RandDatumSimple(rng, types.Uuid)}},
@@ -124,7 +130,9 @@ func TestEncoderEquality(t *testing.T) {
 		{"i INT PRIMARY KEY, b TIMESTAMPTZ", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 		{"i INT PRIMARY KEY, b INTERVAL", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 
-		// TODO, inverted indexes, composite types, ignore indexes, unique indexes
+		// TODO, inverted indexes, composite types, ignore indexes, unique indexes, array types, tuples
+
+		// are NOT NULL columns check constraints?
 
 	} {
 		r := sqlutils.MakeSQLRunner(db)
@@ -249,6 +257,7 @@ func buildVecKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, s
 			b.ColVec(i).Nulls().SetNull(0)
 		}
 	}
+	b.SetLength(1)
 	if err := colenc.InsertBatch(context.Background(), &rh, b, p, colMap); err != nil {
 		return colenc.KVS{}, err
 	}
@@ -259,3 +268,7 @@ func buildVecKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, s
 func TestColIDToRowIndexNull(t *testing.T) {
 
 }
+
+// TODO: enforceLocalColumnConstraints error
+// TODO: checkMutationInput
+// TODO: tryDoResponseAdmission

@@ -79,7 +79,8 @@ func (r VectorRows) NumCols() int {
 
 // Get implements the ExprContainer interface.
 func (r VectorRows) Get(i, j int) Expr {
-	panic("not implemented")
+	return DNull
+	//panic("not implemented")
 }
 
 // put this type assertion here to prevent coldata->tree dependency.
