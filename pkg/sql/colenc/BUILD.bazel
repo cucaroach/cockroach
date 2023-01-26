@@ -6,6 +6,7 @@ go_library(
     srcs = [
         "encode.go",
         "inverted.go",
+        "key.go",
         "legacy.go",
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/colenc",
@@ -25,6 +26,7 @@ go_library(
         "//pkg/sql/rowenc/valueside",
         "//pkg/sql/sem/catid",
         "//pkg/sql/sem/tree",
+        "//pkg/sql/sqlerrors",
         "//pkg/sql/types",
         "//pkg/util/encoding",
         "//pkg/util/json",

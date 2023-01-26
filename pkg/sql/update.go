@@ -414,6 +414,7 @@ func (ss scalarSlot) checkColumnTypes(row []tree.TypedExpr) error {
 // require data validation from other sources than the row data itself. This
 // currently only includes checking for null values in non-nullable columns.
 func enforceLocalColumnConstraints(row tree.Datums, cols []catalog.Column) error {
+	// NB: for vectorized inserts this is handled in the colenc.EncodePK.
 	for i, col := range cols {
 		if !col.IsNullable() && row[i] == tree.DNull {
 			return sqlerrors.NewNonNullViolationError(col.GetName())

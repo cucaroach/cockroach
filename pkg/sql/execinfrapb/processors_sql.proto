@@ -1096,4 +1096,5 @@ message InsertSpec {
     (gogoproto.customname) = "ColumnIDs",
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.ColumnID"
   ];
+  optional bytes checkOrds = 3;
 }

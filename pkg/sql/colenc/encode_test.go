@@ -56,6 +56,9 @@ func TestEncoderEquality(t *testing.T) {
 		ddl    string
 		datums tree.Datums
 	}{
+		// Test some weird datums
+		{"i INT PRIMARY KEY, bi BIT, n NAME, in INET", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
+
 		// I'm not doing this right, it crashes in the row encoder...
 		//{"i INT PRIMARY KEY, c c", []tree.Datum{tree.NewDInt(1234), tree.NewDTupleWithLen(types.Int, 2)}},
 		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
@@ -130,10 +133,12 @@ func TestEncoderEquality(t *testing.T) {
 		{"i INT PRIMARY KEY, b TIMESTAMPTZ", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 		{"i INT PRIMARY KEY, b INTERVAL", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 
-		// TODO, inverted indexes, composite types, ignore indexes, unique indexes, array types, tuples
-
-		// are NOT NULL columns check constraints?
-
+		// TODO: composite types
+		// TODO: ignore indexes
+		// TODO: unique indexes
+		// TODO: array types
+		// TODO: tuples
+		// TODO: tsvector
 	} {
 		r := sqlutils.MakeSQLRunner(db)
 		// Create table, insert primary key since we're not including special rows like rowid.
@@ -258,7 +263,7 @@ func buildVecKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, s
 		}
 	}
 	b.SetLength(1)
-	if err := colenc.InsertBatch(context.Background(), &rh, b, p, colMap); err != nil {
+	if err := colenc.PrepareBatch(context.Background(), &rh, b, p, colMap); err != nil {
 		return colenc.KVS{}, err
 	}
 	return p.kvs, nil

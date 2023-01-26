@@ -135,6 +135,11 @@ COPY t3 FROM STDIN
 ----
 ERROR: failed to satisfy CHECK constraint (i > 0:::INT8) (SQLSTATE 23514)
 
+copy
+COPY t3 FROM STDIN
+1
+----
+1
 
 # Foreign key checks happen
 exec-ddl
@@ -509,3 +514,21 @@ COPY tabnn FROM STDIN
 \N
 ----
 ERROR: null value in column "i" violates not-null constraint (SQLSTATE 23502)
+
+exec-ddl
+CREATE TABLE tinet (i INET CHECK (i < b), b INET)
+----
+
+# Put to rest concerns about Datum types on both sides of check constraint expr.
+copy-error
+COPY tinet FROM STDIN
+192.168.100.128/25	0.0.0.0/0
+----
+ERROR: failed to satisfy CHECK constraint (i < b) (SQLSTATE 23514)
+
+# Put to rest concerns about Datum types on both sides of check constraint expr.
+copy
+COPY tinet FROM STDIN
+0.0.0.0/0	192.168.100.128/25
+----
+1

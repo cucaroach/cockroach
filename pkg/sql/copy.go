@@ -335,9 +335,9 @@ func (c *copyMachine) canSupportVectorized(table catalog.TableDescriptor) bool {
 			// couldn't but it doesn't work right now and we
 			// wouldn't want to enable it until we were sure that
 			// all the checks could be vectorized so the
-			// "bufferNode" used doesn't get materialized into a
-			// datum based row container.
-			return len(table.EnforcedOutboundForeignKeys()) == 0 && len(table.CheckConstraints()) == 0
+			// "bufferNode" used doesn't just get materialized into a
+			// datum based row container.  We could do that insertFastPath thing but
+			return len(table.EnforcedOutboundForeignKeys()) == 0
 		}
 	}
 	return false

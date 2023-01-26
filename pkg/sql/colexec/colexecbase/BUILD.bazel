@@ -19,8 +19,8 @@ go_library(
         "//pkg/col/coldata",
         "//pkg/col/coldataext",  # keep
         "//pkg/col/typeconv",  # keep
-        "//pkg/kv",
         "//pkg/sql/catalog",
+        "//pkg/sql/catalog/descpb",
         "//pkg/sql/colconv",  # keep
         "//pkg/sql/colenc",
         "//pkg/sql/colexec/colexecutils",
@@ -40,6 +40,7 @@ go_library(
         "//pkg/sql/types",
         "//pkg/util",  # keep
         "//pkg/util/duration",  # keep
+        "//pkg/util/intsets",
         "//pkg/util/json",  # keep
         "//pkg/util/log",
         "//pkg/util/timeutil/pgdate",  # keep

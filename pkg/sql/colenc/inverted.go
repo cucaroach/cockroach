@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/valueside"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
@@ -39,18 +38,21 @@ func invertedColToDatum(vec coldata.Vec, row int) tree.Datum {
 	return vec.Datum().Get(row).(tree.Datum)
 }
 
-func encodeInvertedSecondaryIndex(kys []roachpb.Key, index catalog.Index, vecs []coldata.Vec,
-	colMap catalog.TableColMap, p row.Putter, extraKeys [][]byte) error {
+func (b *BatchEncoder) encodeInvertedSecondaryIndex(index catalog.Index, kys []roachpb.Key,
+	extraKeys [][]byte) error {
 	var err error
-	if kys, err = encodeInvertedIndexPrefixKeys(kys, index, vecs, colMap); err != nil {
+	if kys, err = encodeInvertedIndexPrefixKeys(kys, index, b.b.ColVecs(), b.colMap); err != nil {
 		return err
 	}
 	var vec coldata.Vec
-	if i, ok := colMap.Get(index.InvertedColumnID()); ok {
-		vec = vecs[i]
+	if i, ok := b.colMap.Get(index.InvertedColumnID()); ok {
+		vec = b.b.ColVecs()[i]
 	}
-
-	for row := 0; row < vecs[0].Length(); row++ {
+	partialIndexPreds := b.partialIndexes[index.GetID()]
+	for row := 0; row < b.b.Length(); row++ {
+		if partialIndexPreds != nil && !partialIndexPreds.Get(row) {
+			continue
+		}
 		var keys [][]byte
 		val := invertedColToDatum(vec, row)
 		indexGeoConfig := index.GetGeoConfig()
@@ -67,7 +69,7 @@ func encodeInvertedSecondaryIndex(kys []roachpb.Key, index catalog.Index, vecs [
 			if !index.IsUnique() {
 				key = append(key, extraKeys[row]...)
 			}
-			if err = encodeSecondaryIndexNoFamiliesOneRow(index, p, colMap, key, extraKeys[row], vecs, row); err != nil {
+			if err = b.encodeSecondaryIndexNoFamiliesOneRow(index, key, extraKeys[row], row); err != nil {
 				return err
 			}
 		}
@@ -76,8 +78,7 @@ func encodeInvertedSecondaryIndex(kys []roachpb.Key, index catalog.Index, vecs [
 	return nil
 }
 
-func encodeSecondaryIndexNoFamiliesOneRow(ind catalog.Index, p row.Putter,
-	colMap catalog.TableColMap, key roachpb.Key, extraKeyCols []byte, vecs []coldata.Vec, row int) error {
+func (b *BatchEncoder) encodeSecondaryIndexNoFamiliesOneRow(ind catalog.Index, key roachpb.Key, extraKeyCols []byte, row int) error {
 	var value []byte
 	var err error
 	// If we aren't encoding index keys with families, all index keys use the sentinel family 0.
@@ -89,16 +90,16 @@ func encodeSecondaryIndexNoFamiliesOneRow(ind catalog.Index, p row.Putter,
 		value = nil
 	}
 	cols := rowenc.GetValueColumns(ind)
-	value, err = writeColumnValueOneRow(value, colMap, vecs, cols, row)
+	value, err = writeColumnValueOneRow(value, b.colMap, b.b.ColVecs(), cols, row)
 	if err != nil {
 		return err
 	}
 	var kvValue roachpb.Value
 	kvValue.SetBytes(value)
 	if ind.ForcePut() {
-		p.Put(&key, &kvValue)
+		b.p.Put(&key, &kvValue)
 	} else {
-		p.InitPut(&key, &kvValue, false)
+		b.p.InitPut(&key, &kvValue, false)
 	}
 	return nil
 }

@@ -11,6 +11,7 @@
 package sql
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -4617,9 +4618,14 @@ func (dsp *DistSQLPlanner) createPlanForInsert(
 	for i, c := range n.run.insertCols {
 		insColIDs[i] = c.GetID()
 	}
+	var buff bytes.Buffer
+	if !n.run.checkOrds.Empty() {
+		n.run.checkOrds.Encode(&buff)
+	}
 	insertSpec := execinfrapb.InsertSpec{
 		Table:     *n.run.ti.tableDesc().TableDesc(),
 		ColumnIDs: insColIDs,
+		CheckOrds: buff.Bytes(),
 	}
 	var typs []*types.T
 	if len(n.columns) > 0 {

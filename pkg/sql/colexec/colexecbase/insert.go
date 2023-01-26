@@ -11,17 +11,20 @@
 package colexecbase
 
 import (
+	"bytes"
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 )
 
 type vectorInserter struct {
@@ -29,8 +32,10 @@ type vectorInserter struct {
 	helper                row.RowHelper
 	insertCols            []catalog.Column
 	insertColIDtoRowIndex catalog.TableColMap
+	checkOrds             intsets.Fast
 	retBatch              coldata.Batch
-	txn                   *kv.Txn
+	flowCtx               *execinfra.FlowCtx
+	semaCtx               *tree.SemaContext
 }
 
 var _ colexecop.Operator = &vectorInserter{}
@@ -52,42 +57,85 @@ func NewInsertOp(ctx context.Context, flowCtx *execinfra.FlowCtx, spec *execinfr
 		// TODO: figure out how to plumb row metrics which is used to report large rows
 		helper:                row.NewRowHelper(flowCtx.Codec(), desc, desc.WritableNonPrimaryIndexes(), &flowCtx.Cfg.Settings.SV, false, nil /*metrics*/),
 		retBatch:              coldata.NewMemBatchWithCapacity(typs, 1, coldata.StandardColumnFactory),
-		txn:                   flowCtx.Txn,
+		flowCtx:               flowCtx,
 		insertCols:            insCols,
 		insertColIDtoRowIndex: row.ColIDtoRowIndexFromCols(insCols),
+	}
+	if spec.CheckOrds != nil {
+		v.checkOrds.Decode(bytes.NewReader(spec.CheckOrds))
+		v.semaCtx = flowCtx.NewSemaContext(v.flowCtx.Txn)
 	}
 	v.helper.TraceKV = flowCtx.TraceKV
 	return &v
 }
 
-func (i *vectorInserter) Init(ctx context.Context) {
-	i.OneInputHelper.Init(ctx)
-	i.helper.Init()
+func (v *vectorInserter) Init(ctx context.Context) {
+	v.OneInputHelper.Init(ctx)
+	v.helper.Init()
 }
 
-func (i *vectorInserter) Next() coldata.Batch {
-	ctx := context.TODO()
-	b := i.Input.Next()
+func (v *vectorInserter) Next() coldata.Batch {
+	ctx := v.Ctx
+	b := v.Input.Next()
 	if b.Length() == 0 {
 		return coldata.ZeroBatch
 	}
 	// FIXME: figure out where to do kv trace, maybe wrap b in custom Putter interface?
-	kvb := i.txn.NewBatch()
+	kvb := v.flowCtx.Txn.NewBatch()
+
+	var partialIndexColMap map[descpb.IndexID]coldata.Bools
+	// FIXME: handle partial index predicates
+	// Create a set of partial index IDs to not write to. Indexes should not be
+	// written to when they are partial indexes and the row does not satisfy the
+	// predicate. This set is passed as a parameter to tableInserter.row below.
+	if n := len(v.helper.TableDesc.PartialIndexes()); n > 0 {
+		for i := len(v.insertCols) + v.checkOrds.Len(); i < len(b.ColVecs()); i++ {
+			if partialIndexColMap == nil {
+				partialIndexColMap = make(map[descpb.IndexID]coldata.Bools)
+			}
+		}
+	}
+
+	// FIXME: look at check constraint columns
+	if !v.checkOrds.Empty() {
+		if err := v.checkMutationInput(ctx, b); err != nil {
+			panic(err)
+		}
+	}
 	// FIXME:  allow InsertBatch to partially insert stuff and loop here til everything is done,
 	// if there are a ton of secondary indexes we could hit workmem limit building kv batch so we
 	// need to be able to do it in chunks of rows.
-	if err := colenc.InsertBatch(ctx, &i.helper, b, kvb, i.insertColIDtoRowIndex); err != nil {
+	enc := colenc.MakeEncoder(&v.helper, b, kvb, v.insertColIDtoRowIndex, partialIndexColMap)
+	if err := enc.PrepareBatch(ctx); err != nil {
 		panic(err)
 	}
 	// FIXME: if we are autocommitting this should be CommitInBatch
-	if err := i.txn.Run(ctx, kvb); err != nil {
-		panic(row.ConvertBatchError(ctx, i.helper.TableDesc, kvb))
+	if err := v.flowCtx.Txn.Run(ctx, kvb); err != nil {
+		panic(row.ConvertBatchError(ctx, v.helper.TableDesc, kvb))
 	}
-	i.retBatch.ColVec(0).Int64().Set(0, int64(b.Length()))
-	i.retBatch.SetLength(1)
+	v.retBatch.ColVec(0).Int64().Set(0, int64(b.Length()))
+	v.retBatch.SetLength(1)
 
 	// FIXME: Possibly initiate a run of CREATE STATISTICS.
 	// params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc, len(n.input))
 
-	return i.retBatch
+	return v.retBatch
+}
+
+func (v *vectorInserter) checkMutationInput(ctx context.Context, b coldata.Batch) error {
+	checks := v.helper.TableDesc.EnforcedCheckConstraints()
+	colIdx := 0
+	for i, ch := range checks {
+		if !v.checkOrds.Contains(i) {
+			continue
+		}
+		vec := b.ColVec(colIdx + len(v.insertCols))
+		for r := 0; r < b.Length(); r++ {
+			if !vec.Bool()[r] && !vec.Nulls().NullAt(r) {
+				return row.CheckFailed(ctx, v.semaCtx, v.flowCtx.EvalCtx.SessionData(), v.helper.TableDesc, ch)
+			}
+		}
+		colIdx++
+	}
+	return nil
 }
