@@ -30,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
@@ -52,7 +51,7 @@ func MakeEncoder(rh *row.RowHelper,
 }
 
 func (b *BatchEncoder) PrepareBatch(ctx context.Context) error {
-	err := b.EncodePK(ctx)
+	err := b.EncodePK(ctx, b.rh.TableDesc.GetPrimaryIndex())
 	if err != nil {
 		return err
 	}
@@ -65,17 +64,13 @@ func (b *BatchEncoder) PrepareBatch(ctx context.Context) error {
 	return nil
 }
 
-func (b *BatchEncoder) EncodePK(ctx context.Context) error {
-	ind := b.rh.TableDesc.GetPrimaryIndex()
+func (b *BatchEncoder) EncodePK(ctx context.Context, ind catalog.Index) error {
 	desc := b.rh.TableDesc
 	count := b.b.Length()
 	vecs := b.b.ColVecs()
-	keyAndSuffixCols := b.rh.TableDesc.IndexFetchSpecKeyAndSuffixColumns(ind)
+	keyAndSuffixCols := desc.IndexFetchSpecKeyAndSuffixColumns(ind)
 	keyCols := keyAndSuffixCols[:ind.NumKeyColumns()]
-	fetchedCols := desc.PublicColumns()
-	kys := make([]roachpb.Key, count)
-	rowBufSize := 5*len(keyCols) + len(b.rh.PrimaryIndexKeyPrefix)
-	buffer := make([]byte, 0, count*rowBufSize)
+
 	families := desc.GetFamilies()
 	// TODO: what are key length limits, could this be int16? Is int32 okay?
 	var pkoffsets []int32
@@ -84,12 +79,23 @@ func (b *BatchEncoder) EncodePK(ctx context.Context) error {
 	if len(families) > 1 {
 		pkoffsets = make([]int32, count)
 	}
-
+	// Partial index support, we will use this to leave some keys nil.
+	var piPreds coldata.Bools
+	if b.partialIndexes != nil {
+		piPreds = b.partialIndexes[ind.GetID()]
+	}
 	// Initialize count buffers sliced from one big buffer
-	for row := 0; row < count; row++ {
-		offset := row * rowBufSize
+	kys := make([]roachpb.Key, count)
+	rowBufSize := 5*len(keyCols) + len(b.rh.PrimaryIndexKeyPrefix)
+	buffer := make([]byte, 0, count*rowBufSize)
+	for row, counter := 0, 0; row < count; row++ {
+		if piPreds != nil && !piPreds.Get(row) {
+			continue
+		}
+		offset := counter * rowBufSize
 		kys[row] = buffer[offset : offset : rowBufSize+offset]
 		kys[row] = append(kys[row], b.rh.PrimaryIndexKeyPrefix...)
+		counter++
 	}
 
 	var nulls coldata.Nulls
@@ -121,25 +127,34 @@ func (b *BatchEncoder) EncodePK(ctx context.Context) error {
 		if !ok {
 			return errors.AssertionFailedf("invalid family sorted column id map")
 		}
-		var values [][]byte
 		var lastColIDs []catid.ColumnID
 
 		// reset keys for new family
 		if i > 0 {
 			buffer := make([]byte, 0, count*rowBufSize)
-			for row := 0; row < count; row++ {
-				offset := row * rowBufSize
-				newkys := make([]roachpb.Key, count)
+			newkys := make([]roachpb.Key, count)
+			for row, counter := 0, 0; row < count; row++ {
+				// Elided partial index keys will be nil.
+				if kys[row] == nil {
+					continue
+				}
+				offset := counter * rowBufSize
 				newkys[row] = buffer[offset : offset : rowBufSize+offset]
 				newkys[row] = append(newkys[row], kys[row][:pkoffsets[row]]...)
-				kys = newkys
+				counter++
 			}
-
+			kys = newkys
 		}
 
-		for rowoffset := 0; rowoffset < count; rowoffset++ {
-			kys[rowoffset] = keys.MakeFamilyKey(kys[rowoffset], uint32(family.ID))
+		for row := 0; row < count; row++ {
+			// Elided partial index keys will be nil.
+			if kys[row] == nil {
+				continue
+			}
+			kys[row] = keys.MakeFamilyKey(kys[row], uint32(family.ID))
 		}
+
+		fetchedCols := desc.PublicColumns()
 
 		// We need to ensure that column family 0 contains extra metadata, like composite primary key values.
 		// Additionally, the decoders expect that column family 0 is encoded with a TUPLE value tag, so we
@@ -148,49 +163,49 @@ func (b *BatchEncoder) EncodePK(ctx context.Context) error {
 			// Storage optimization to store DefaultColumnID directly as a value. Also
 			// backwards compatible with the original BaseFormatVersion.
 
-			// TODO: valColIDMapping vs. updatedColIDMapping????
+			// TODO(cucaroach): valColIDMapping vs. updatedColIDMapping????
 			idx, ok := b.colMap.Get(family.DefaultColumnID)
 			if !ok {
 				continue
 			}
 
+			values := make([]roachpb.Value, count)
+
 			typ := fetchedCols[idx].GetType()
 			vec := vecs[idx]
 			for row := 0; row < count; row++ {
+				if piPreds != nil && !piPreds[row] {
+					continue
+				}
 				marshaled, err := MarshalLegacy(typ, vec, row)
 				if err != nil {
 					return err
 				}
 
 				if marshaled.RawBytes == nil {
-					if false /*overwrite*/ {
-						// If the new family contains a NULL value, then we must
-						// delete any pre-existing row.
-						//insertDelFn(ctx, batch, kvKey, traceKV)
-					}
+					// Tell CPutValues to ignore this one.
+					kys[row] = nil
+					// TODO(cucaroach): update support
+					// if overwrite {
+					// 	// If the new family contains a NULL value, then we must
+					// 	// delete any pre-existing row.
+					// 	//insertDelFn(ctx, batch, kvKey, traceKV)
+					// }
 				} else {
 					// We only output non-NULL values. Non-existent column keys are
 					// considered NULL during scanning and the row sentinel ensures we know
 					// the row exists.
-					// if err := helper.checkRowSize(ctx, kvKey, &marshaled, family.ID); err != nil {
-					// 	return nil, err
-					// }
-					// TODO(cucaroach): make this use the bulk put operations and push traceKV stuff beneath Putter interface
-					if b.rh.TraceKV {
-						log.VEventfDepth(ctx, 1, 2, "CPut %s -> %s", kys[row], marshaled.PrettyPrint())
-						b.p.CPut(&kys[row], &marshaled, nil /* expValue */)
-					} else {
-						b.p.CPut(&kys[row], &marshaled, nil /* expValue */)
+					if err := b.rh.CheckRowSize(ctx, &kys[row], &marshaled, family.ID); err != nil {
+						return err
 					}
+					values[row] = marshaled
 				}
 			}
-
+			b.p.CPutValues(kys, values)
 			continue
 		}
 
-		if values == nil {
-			values = make([][]byte, count)
-		}
+		values := make([][]byte, count)
 		if lastColIDs == nil {
 			lastColIDs = make([]catid.ColumnID, count)
 		}
@@ -213,6 +228,9 @@ func (b *BatchEncoder) EncodePK(ctx context.Context) error {
 			typ := col.GetType()
 			vec := vecs[idx]
 			for row := 0; row < count; row++ {
+				if piPreds != nil && !piPreds[row] {
+					continue
+				}
 				if vec.Nulls().NullAt(row) {
 					if !col.IsNullable() {
 						return sqlerrors.NewNonNullViolationError(col.GetName())
@@ -245,7 +263,11 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 
 	// Use the primary key encoding for covering indexes.
 	if ind.GetEncodingType() == catenumpb.PrimaryIndexEncoding {
-		return b.EncodePK(ctx)
+		return b.EncodePK(ctx, ind)
+	}
+	var piPreds coldata.Bools
+	if b.partialIndexes != nil {
+		piPreds = b.partialIndexes[ind.GetID()]
 	}
 
 	keyAndSuffixCols := b.rh.TableDesc.IndexFetchSpecKeyAndSuffixColumns(ind)
@@ -256,13 +278,17 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 	rowBufSize := 5*len(keyCols) + len(secondaryIndexKeyPrefix)
 	buffer := make([]byte, 0, count*rowBufSize)
 
-	for rowoffset := 0; rowoffset < count; rowoffset++ {
-		offset := rowoffset * rowBufSize
+	for rowoffset, counter := 0, 0; rowoffset < count; rowoffset++ {
+		if piPreds != nil && !piPreds.Get(rowoffset) {
+			continue
+		}
+		offset := counter * rowBufSize
 		kys[rowoffset] = buffer[offset : offset : rowBufSize+offset]
 		kys[rowoffset] = append(kys[rowoffset], secondaryIndexKeyPrefix...)
+		counter++
 	}
 
-	extraKeys, _, err := encodeColumnsValues(ind.IndexDesc().KeySuffixColumnIDs, nil /*directions*/, b.colMap, b.b.ColVecs(), nil /*keyPrefixs*/)
+	extraKeys, _, err := encodeColumns[[]byte](ind.IndexDesc().KeySuffixColumnIDs, nil /*directions*/, b.colMap, count, b.b.ColVecs(), nil /*keyPrefixs*/)
 	if err != nil {
 		return err
 	}
@@ -278,12 +304,15 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 		}
 	}
 
-	for rowoffset := 0; rowoffset < count; rowoffset++ {
-		if !ind.IsUnique() || nulls.NullAtChecked(rowoffset) {
-			kys[rowoffset] = append(kys[rowoffset], extraKeys[rowoffset]...)
+	for row := 0; row < count; row++ {
+		// Elided partial index keys will be nil.
+		if kys[row] == nil {
+			continue
 		}
-		// TODO: secondary index family support
-		kys[rowoffset] = keys.MakeFamilyKey(kys[rowoffset], 0)
+		if !ind.IsUnique() || nulls.NullAtChecked(row) {
+			kys[row] = append(kys[row], extraKeys[row]...)
+		}
+		kys[row] = keys.MakeFamilyKey(kys[row], 0)
 	}
 
 	if b.rh.TableDesc.NumFamilies() == 1 || ind.GetVersion() == descpb.BaseIndexFormatVersion {
@@ -291,7 +320,7 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 			return err
 		}
 	} else {
-		//TODO
+		// TODO: secondary index family support
 	}
 	return nil
 }
@@ -305,8 +334,7 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 		// TODO: make preallocated slices out of big slice
 		values = make([][]byte, b.b.Length())
 	}
-	cols := rowenc.GetValueColumns(ind)
-	values, err = writeColumnValues(values, b.colMap, b.b.ColVecs(), cols)
+	values, err = b.writeColumnValues(kys, values, ind)
 	if err != nil {
 		return err
 	}
@@ -318,21 +346,21 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	return nil
 }
 
-func writeColumnValues(values [][]byte, colMap catalog.TableColMap, vecs []coldata.Vec,
-	cols []rowenc.ValueEncodedColumn) ([][]byte, error) {
+func (b *BatchEncoder) writeColumnValues(kys []roachpb.Key, values [][]byte, ind catalog.Index) ([][]byte, error) {
+	cols := rowenc.GetValueColumns(ind)
 	var err error
-	count := vecs[0].Length()
+	count := b.b.Length()
 	lastColIDs := make([]catid.ColumnID, count)
 
 	for _, col := range cols {
-		idx, ok := colMap.Get(col.Id)
+		idx, ok := b.colMap.Get(col.Id)
 		if !ok {
 			// Column not being updated or inserted.
 			continue
 		}
-		vec := vecs[idx]
+		vec := b.b.ColVec(idx)
 		for row := 0; row < count; row++ {
-			if vec.Nulls().NullAt(row) {
+			if vec.Nulls().NullAt(row) || kys[row] == nil {
 				continue
 			}
 			if lastColIDs[row] > col.Id {
@@ -349,46 +377,16 @@ func writeColumnValues(values [][]byte, colMap catalog.TableColMap, vecs []colda
 	return values, nil
 }
 
-// encodeColumns is the vector version of rowenc.EncodeColumns
-func encodeColumnsKeys(
+// encodeColumns is the vector version of rowenc.EncodeColumns. It is generic
+// so we can use it on raw byte slices and roachpb.Key.
+func encodeColumns[T []byte | roachpb.Key](
 	columnIDs []descpb.ColumnID,
 	directions []catenumpb.IndexColumn_Direction,
 	colMap catalog.TableColMap,
+	count int,
 	vecs []coldata.Vec,
-	keyPrefixes []roachpb.Key) ([]roachpb.Key, *coldata.Nulls, error) {
-	count := vecs[0].Length()
-	keys := make([]roachpb.Key, count)
-	var nulls coldata.Nulls
-	var err error
-	for _, id := range columnIDs {
-		var vec coldata.Vec
-		var typ *types.T
-		i, ok := colMap.Get(id)
-		if ok {
-			vec = vecs[i]
-			typ = vec.Type()
-			if vec.Nulls().MaybeHasNulls() {
-				nulls = nulls.Or(*vec.Nulls())
-			}
-		}
-		for row := 0; row < count; row++ {
-			if keys[row], err = encodeKey(keyPrefixes[row], typ, encoding.Ascending, vec, row); err != nil {
-				return nil, nil, err
-			}
-		}
-	}
-	return keys, &nulls, nil
-}
-
-// encodeColumns is the vector version of rowenc.EncodeColumns, TODO: can we use generics to get rid of COPY of above function?
-func encodeColumnsValues(
-	columnIDs []descpb.ColumnID,
-	directions []catenumpb.IndexColumn_Direction,
-	colMap catalog.TableColMap,
-	vecs []coldata.Vec,
-	keyPrefixes [][]byte) ([][]byte, *coldata.Nulls, error) {
-	count := vecs[0].Length()
-	keys := make([][]byte, count)
+	keyPrefixes []T) ([]T, *coldata.Nulls, error) {
+	keys := make([]T, count)
 	var nulls coldata.Nulls
 	var err error
 	for _, id := range columnIDs {

@@ -532,3 +532,18 @@ COPY tinet FROM STDIN
 0.0.0.0/0	192.168.100.128/25
 ----
 1
+
+exec-ddl
+CREATE TABLE tpartial (i INT PRIMARY KEY, index(i) WHERE i > 0)
+----
+
+copy-kvtrace
+COPY tpartial FROM STDIN
+-1
+0
+1
+----
+CPut /Table/<>/1/-1/0 -> /TUPLE/
+CPut /Table/<>/1/0/0 -> /TUPLE/
+CPut /Table/<>/1/1/0 -> /TUPLE/
+InitPut /Table/<>/2/1/0 -> /BYTES/

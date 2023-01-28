@@ -11,6 +11,7 @@ go_library(
         "insert.go",
         "ordinality.go",
         "simple_project.go",
+        "trace.go",
         ":gen-exec",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase",
@@ -19,6 +20,7 @@ go_library(
         "//pkg/col/coldata",
         "//pkg/col/coldataext",  # keep
         "//pkg/col/typeconv",  # keep
+        "//pkg/roachpb",
         "//pkg/sql/catalog",
         "//pkg/sql/catalog/descpb",
         "//pkg/sql/colconv",  # keep
@@ -35,6 +37,7 @@ go_library(
         "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/row",
         "//pkg/sql/rowenc",  # keep
+        "//pkg/sql/sem/catid",
         "//pkg/sql/sem/eval",  # keep
         "//pkg/sql/sem/tree",  # keep
         "//pkg/sql/types",

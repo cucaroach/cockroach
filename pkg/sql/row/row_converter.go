@@ -75,6 +75,7 @@ func (i KVInserter) InitPut(key, value interface{}, failOnTombstones bool) {
 }
 
 func (c KVInserter) CPutTuples(kys []roachpb.Key, values [][]byte)                          {}
+func (c KVInserter) CPutValues(kys []roachpb.Key, values []roachpb.Value)                   {}
 func (c KVInserter) PutBytes(kys []roachpb.Key, values [][]byte)                            {}
 func (c KVInserter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {}
 

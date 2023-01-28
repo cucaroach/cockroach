@@ -105,6 +105,10 @@ func (b *BatchEncoder) encodeIndexKey(kys []roachpb.Key, keyCols []fetchpb.Index
 			nulls.SetNulls()
 		}
 		for row := 0; row < b.b.Length(); row++ {
+			// Elided partial index keys will be nil
+			if kys[row] == nil {
+				continue
+			}
 			if kys[row], err = encodeKey(kys[row], k.Type, dir, vec, row); err != nil {
 				return err
 			}

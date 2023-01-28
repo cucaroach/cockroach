@@ -15,11 +15,13 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -57,7 +59,7 @@ func TestEncoderEquality(t *testing.T) {
 		datums tree.Datums
 	}{
 		// Test some weird datums
-		{"i INT PRIMARY KEY, bi BIT, n NAME, in INET", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
+		{"i INT PRIMARY KEY, bi BIT, n NAME, ine INET", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
 
 		// I'm not doing this right, it crashes in the row encoder...
 		//{"i INT PRIMARY KEY, c c", []tree.Datum{tree.NewDInt(1234), tree.NewDTupleWithLen(types.Int, 2)}},
@@ -139,6 +141,7 @@ func TestEncoderEquality(t *testing.T) {
 		// TODO: array types
 		// TODO: tuples
 		// TODO: tsvector
+		// TODO: covering secondary indexes
 	} {
 		r := sqlutils.MakeSQLRunner(db)
 		// Create table, insert primary key since we're not including special rows like rowid.
@@ -158,7 +161,12 @@ func TestEncoderEquality(t *testing.T) {
 
 func checkEqual(t *testing.T, rowKVs, vecKVs colenc.KVS) {
 	require.Equal(t, len(rowKVs.Keys), len(rowKVs.Values))
-	require.Equal(t, len(rowKVs.Values), len(vecKVs.Values))
+	if len(rowKVs.Keys) != len(vecKVs.Keys) {
+		t.Errorf("row keys:\n%s\nvec keys:\n%s\n", printKeys(rowKVs.Keys), printKeys(vecKVs.Keys))
+	}
+	if len(rowKVs.Values) != len(vecKVs.Values) {
+		t.Errorf("row keys:\n%srow values:\n%s\nvec keys:\n%s\nvec values:\n%s\n", printKeys(rowKVs.Keys), printVals(rowKVs.Values), printKeys(vecKVs.Keys), printVals(vecKVs.Values))
+	}
 	for i, k1 := range rowKVs.Keys {
 		k2 := vecKVs.Keys[i]
 		if !bytes.Equal(k1, k2) {
@@ -173,6 +181,78 @@ func checkEqual(t *testing.T, rowKVs, vecKVs colenc.KVS) {
 		}
 	}
 }
+
+func buildRowKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, sv *settings.Values) (colenc.KVS, error) {
+	inserter, err := row.MakeInserter(context.Background(), nil /*txn*/, keys.SystemSQLCodec, desc, desc.PublicColumns(), nil, sv, false, nil)
+	if err != nil {
+		return colenc.KVS{}, err
+	}
+	p := &capturePutter{}
+	var pm row.PartialIndexUpdateHelper
+	if err := inserter.InsertRow(context.Background(), p, datums, pm, false, true); err != nil {
+		return colenc.KVS{}, err
+	}
+	return p.kvs, nil
+}
+
+func buildVecKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, sv *settings.Values) (colenc.KVS, error) {
+	rh := row.NewRowHelper(keys.SystemSQLCodec, desc, desc.WritableNonPrimaryIndexes(), sv, false, nil)
+	rh.Init()
+	rh.TraceKV = true
+	p := &capturePutter{}
+	cols := desc.PublicColumns()
+	colMap := row.ColIDtoRowIndexFromCols(cols)
+	typs := make([]*types.T, len(cols))
+	for i, c := range cols {
+		typs[i] = c.GetType()
+	}
+	factory := coldataext.NewExtendedColumnFactory(nil /*evalCtx */)
+	b := coldata.NewMemBatchWithCapacity(typs, 1, factory)
+	for i, t := range typs {
+		converter := colconv.GetDatumToPhysicalFn(t)
+		if datums[i] != tree.DNull {
+			coldata.SetValueAt(b.ColVec(i), converter(datums[i]), 0 /* rowIdx */)
+		} else {
+			b.ColVec(i).Nulls().SetNull(0)
+		}
+	}
+	b.SetLength(1)
+
+	be := colenc.MakeEncoder(&rh, b, p, colMap, nil)
+	if err := be.PrepareBatch(context.Background()); err != nil {
+		return colenc.KVS{}, err
+	}
+	return p.kvs, nil
+}
+
+// How do I test this case?
+func TestColIDToRowIndexNull(t *testing.T) {
+
+}
+
+func printVals(vals [][]byte) string {
+	var buf strings.Builder
+	var v roachpb.Value
+	for i, _ := range vals {
+		v.RawBytes = vals[i]
+		buf.WriteString(v.PrettyPrint())
+		buf.WriteByte('\n')
+	}
+	return buf.String()
+}
+
+func printKeys(kys []roachpb.Key) string {
+	var buf strings.Builder
+	for _, k := range kys {
+		buf.WriteString(k.String())
+		buf.WriteByte('\n')
+	}
+	return buf.String()
+}
+
+// TODO: partial indexes
+// TODO: checkMutationInput
+// TODO: tryDoResponseAdmission
 
 type capturePutter struct {
 	kvs     colenc.KVS
@@ -209,10 +289,23 @@ func (c *capturePutter) Del(key ...interface{}) {
 
 func (c *capturePutter) CPutTuples(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
+		if k == nil {
+			continue
+		}
 		c.kvs.Keys = append(c.kvs.Keys, k)
 		var kvValue roachpb.Value
 		kvValue.SetTuple(values[i])
 		c.kvs.Values = append(c.kvs.Values, kvValue.RawBytes)
+	}
+}
+
+func (c *capturePutter) CPutValues(kys []roachpb.Key, values []roachpb.Value) {
+	for i, k := range kys {
+		if k == nil {
+			continue
+		}
+		c.kvs.Keys = append(c.kvs.Keys, k)
+		c.kvs.Values = append(c.kvs.Values, values[i].RawBytes)
 	}
 }
 
@@ -222,58 +315,12 @@ func (c *capturePutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 }
 func (c *capturePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
 	for i, k := range kys {
+		if k == nil {
+			continue
+		}
 		c.kvs.Keys = append(c.kvs.Keys, k)
 		var kvValue roachpb.Value
 		kvValue.SetBytes(values[i])
 		c.kvs.Values = append(c.kvs.Values, kvValue.RawBytes)
 	}
 }
-
-func buildRowKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, sv *settings.Values) (colenc.KVS, error) {
-	inserter, err := row.MakeInserter(context.Background(), nil /*txn*/, keys.SystemSQLCodec, desc, desc.PublicColumns(), nil, sv, false, nil)
-	if err != nil {
-		return colenc.KVS{}, err
-	}
-	p := &capturePutter{}
-	var pm row.PartialIndexUpdateHelper
-	if err := inserter.InsertRow(context.Background(), p, datums, pm, false, true); err != nil {
-		return colenc.KVS{}, err
-	}
-	return p.kvs, nil
-}
-
-func buildVecKVs(ddl string, datums tree.Datums, desc catalog.TableDescriptor, sv *settings.Values) (colenc.KVS, error) {
-	rh := row.NewRowHelper(keys.SystemSQLCodec, desc, desc.WritableNonPrimaryIndexes(), sv, false, nil)
-	rh.Init()
-	rh.TraceKV = true
-	p := &capturePutter{}
-	cols := desc.PublicColumns()
-	colMap := row.ColIDtoRowIndexFromCols(cols)
-	typs := make([]*types.T, len(cols))
-	for i, c := range cols {
-		typs[i] = c.GetType()
-	}
-	b := coldata.NewMemBatchWithCapacity(typs, 1, coldata.StandardColumnFactory)
-	for i, t := range typs {
-		converter := colconv.GetDatumToPhysicalFn(t)
-		if datums[i] != tree.DNull {
-			coldata.SetValueAt(b.ColVec(i), converter(datums[i]), 0 /* rowIdx */)
-		} else {
-			b.ColVec(i).Nulls().SetNull(0)
-		}
-	}
-	b.SetLength(1)
-	if err := colenc.PrepareBatch(context.Background(), &rh, b, p, colMap); err != nil {
-		return colenc.KVS{}, err
-	}
-	return p.kvs, nil
-}
-
-// How do I test this case?
-func TestColIDToRowIndexNull(t *testing.T) {
-
-}
-
-// TODO: partial indexes
-// TODO: checkMutationInput
-// TODO: tryDoResponseAdmission

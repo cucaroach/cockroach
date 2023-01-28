@@ -66,7 +66,7 @@ const lineitemSchema string = `CREATE TABLE lineitem (
 
 const csvData = `%d|155190|7706|1|17|21168.23|0.04|0.02|N|O|1996-03-13|1996-02-12|1996-03-22|DELIVER IN PERSON|TRUCK|egular courts above the`
 
-func TestCopy(t *testing.T) {
+func TestCopyDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
@@ -89,19 +89,48 @@ func TestCopy(t *testing.T) {
 				require.NoError(t, err, "%s: %s", d.Pos, d.Cmd)
 			}
 			return ""
-		case "copy", "copy-error":
+		case "copy", "copy-error", "copy-kvtrace":
+			kvtrace := d.Cmd == "copy-kvtrace"
 			lines := strings.Split(d.Input, "\n")
 			stmt := lines[0]
 			data := strings.Join(lines[1:], "\n")
+			if kvtrace {
+				err := conn.Exec(ctx, "SET TRACING=on,kv")
+				require.NoError(t, err)
+			}
 			rows, err := conn.GetDriverConn().CopyFrom(ctx, strings.NewReader(data), stmt)
-			if d.Cmd == "copy" {
+			if kvtrace {
+				err := conn.Exec(ctx, "SET TRACING=off")
+				require.NoError(t, err)
+			}
+			switch d.Cmd {
+			case "copy":
 				require.NoError(t, err, "%s\n%s\n", d.Cmd, d.Input)
 				require.Equal(t, int(rows), len(lines)-1, "Not all rows were inserted")
-			} else {
+				return fmt.Sprintf("%d", rows)
+			case "copy-error":
 				require.Error(t, err, "copy-error didn't return and error!")
 				return err.Error()
+			case "copy-kvtrace":
+				rows, err := conn.Query(ctx,
+					`SELECT 
+					  REGEXP_REPLACE(message, '/Table/[0-9]*/', '/Table/<>/') 
+					FROM [SHOW KV TRACE FOR SESSION] 
+					WHERE message LIKE '%Put % -> %'`)
+				defer rows.Close()
+				require.NoError(t, err)
+				vals := make([]driver.Value, 1)
+				var results strings.Builder
+				for err = nil; err == nil; {
+					err = rows.Next(vals)
+					if err == io.EOF {
+						break
+					}
+					require.NoError(t, err)
+					results.WriteString(fmt.Sprintf("%v\n", vals[0]))
+				}
+				return results.String()
 			}
-			return fmt.Sprintf("%d", rows)
 		case "query":
 			rows, err := conn.Query(ctx, d.Input)
 			require.NoError(t, err)
@@ -128,12 +157,29 @@ func TestCopy(t *testing.T) {
 		default:
 			return fmt.Sprintf("unknown command: %s\n", d.Cmd)
 		}
-
+		return ""
 	}
 
-	// TODO(cucaroach): run this for vectorize=on and vectorize=off, atomic and
-	// non-atomic.
-	datadriven.RunTest(t, datapathutils.TestDataPath(t, "copyfrom"), testCopy)
+	//datadriven.RunTest(t, datapathutils.TestDataPath(t, "test"), testCopy)
+
+	// TODO(cucaroach): add multiple files
+	for _, vectorize := range []string{"on", "off"} {
+		err := conn.Exec(ctx, fmt.Sprintf(`SET VECTORIZE='%s'`, vectorize))
+		require.NoError(t, err)
+		for _, atomic := range []string{"on", "off"} {
+			conn.Exec(ctx, fmt.Sprintf(`SET COPY_FROM_ATOMIC_ENABLED='%s'`, atomic))
+			require.NoError(t, err)
+			for _, fastPath := range []string{"on", "off"} {
+				err = conn.Exec(ctx, fmt.Sprintf(`SET COPY_FAST_PATH_ENABLED='%s'`, fastPath))
+				require.NoError(t, err)
+				err = conn.Exec(ctx, "CREATE SCHEMA copytest; SET SCHEMA copytest")
+				require.NoError(t, err)
+				datadriven.RunTest(t, datapathutils.TestDataPath(t, "copyfrom"), testCopy)
+				err = conn.Exec(ctx, "DROP SCHEMA copytest CASCADE")
+				require.NoError(t, err)
+			}
+		}
+	}
 }
 
 // TestCopyFromTransaction tests that copy from rows are written with

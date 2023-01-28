@@ -157,9 +157,9 @@ type copyMachine struct {
 	// For testing we want to be able to override this on the instance level.
 	copyBatchRowSize int
 
-	implicitTxn bool
-
-	vectorized bool
+	implicitTxn  bool
+	copyFastPath bool
+	vectorized   bool
 }
 
 // newCopyMachine creates a new copyMachine.
@@ -305,6 +305,7 @@ func newCopyMachine(
 	}
 	c.initMonitoring(ctx, parentMon)
 	c.processRows = c.insertRows
+	c.copyFastPath = c.p.SessionData().CopyFastPathEnabled
 
 	if c.canSupportVectorized(tableDesc) {
 		// If we're using the row based default size, swap in bigger vector
@@ -329,18 +330,25 @@ func newCopyMachine(
 
 func (c *copyMachine) canSupportVectorized(table catalog.TableDescriptor) bool {
 	// TODO(cucaroach): support vectorized binary.
-	if c.format != tree.CopyFormatBinary {
-		if c.p.SessionData().VectorizeMode != sessiondatapb.VectorizeOff {
-			// Vectorized COPY doesn't support foreign key checks, no reason it
-			// couldn't but it doesn't work right now and we
-			// wouldn't want to enable it until we were sure that
-			// all the checks could be vectorized so the
-			// "bufferNode" used doesn't just get materialized into a
-			// datum based row container.  We could do that insertFastPath thing but
-			return len(table.EnforcedOutboundForeignKeys()) == 0
-		}
+	if c.format == tree.CopyFormatBinary {
+		return false
 	}
-	return false
+	// Vectorized requires avoiding materializing the rows for the optimizer.
+	if !c.copyFastPath {
+		return false
+	}
+	if c.p.SessionData().VectorizeMode == sessiondatapb.VectorizeOff {
+		return false
+	}
+	// Vectorized COPY doesn't support foreign key checks, no reason it couldn't
+	// but it doesn't work right now because we don't have the ability to
+	// hold the results in a bufferNode. We wouldn't want to enable it
+	// until we were sure that all the checks could be vectorized so the
+	// "bufferNode" used doesn't just get materialized into a datum based
+	// row container. I think that requires a vectorized version of lookup
+	// join. TODO(cucaroach): extend the vectorized insert code to support
+	// insertFastPath style FK checks.
+	return len(table.EnforcedOutboundForeignKeys()) == 0
 }
 
 func (c *copyMachine) numInsertedRows() int {
@@ -961,9 +969,8 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 		}
 	}
 
-	copyFastPath := c.p.SessionData().CopyFastPathEnabled
 	var vc tree.SelectStatement
-	if copyFastPath {
+	if c.copyFastPath {
 		if c.vectorized {
 			b := tree.VectorRows{Batch: c.batch}
 			vc = &tree.LiteralValuesClause{Rows: &b}
@@ -1121,7 +1128,6 @@ func (c *copyMachine) readTextTupleVec(ctx context.Context, line []byte) error {
 			types.TimestampFamily,
 			types.TimestampTZFamily,
 			types.UuidFamily:
-			// TODO(cucaroach): we can probably get rid of some memory allocations here.
 			s = decodeCopy(s)
 		}
 		switch c.resultColumns[i].Typ.Family() {

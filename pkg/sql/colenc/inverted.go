@@ -41,7 +41,7 @@ func invertedColToDatum(vec coldata.Vec, row int) tree.Datum {
 func (b *BatchEncoder) encodeInvertedSecondaryIndex(index catalog.Index, kys []roachpb.Key,
 	extraKeys [][]byte) error {
 	var err error
-	if kys, err = encodeInvertedIndexPrefixKeys(kys, index, b.b.ColVecs(), b.colMap); err != nil {
+	if kys, err = encodeInvertedIndexPrefixKeys(kys, index, b.b, b.colMap); err != nil {
 		return err
 	}
 	var vec coldata.Vec
@@ -132,7 +132,7 @@ func writeColumnValueOneRow(value []byte, colMap catalog.TableColMap, vecs []col
 	return value, nil
 }
 
-func encodeInvertedIndexPrefixKeys(kys []roachpb.Key, index catalog.Index, vecs []coldata.Vec, colMap catalog.TableColMap) ([]roachpb.Key, error) {
+func encodeInvertedIndexPrefixKeys(kys []roachpb.Key, index catalog.Index, b coldata.Batch, colMap catalog.TableColMap) ([]roachpb.Key, error) {
 	numColumns := index.NumKeyColumns()
 	var err error
 	// If the index is a multi-column inverted index, we encode the non-inverted
@@ -143,7 +143,7 @@ func encodeInvertedIndexPrefixKeys(kys []roachpb.Key, index catalog.Index, vecs 
 		colIDs := index.IndexDesc().KeyColumnIDs[:numColumns-1]
 		dirs := index.IndexDesc().KeyColumnDirections
 
-		kys, _, err = encodeColumnsKeys(colIDs, dirs, colMap, vecs, kys)
+		kys, _, err = encodeColumns(colIDs, dirs, colMap, b.Length(), b.ColVecs(), kys)
 		if err != nil {
 			return nil, err
 		}

@@ -118,6 +118,7 @@ type Putter interface {
 	InitPut(key, value interface{}, failOnTombstones bool)
 	Del(key ...interface{})
 
+	CPutValues(kys []roachpb.Key, values []roachpb.Value)
 	CPutTuples(kys []roachpb.Key, values [][]byte)
 	PutBytes(kys []roachpb.Key, values [][]byte)
 	InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool)

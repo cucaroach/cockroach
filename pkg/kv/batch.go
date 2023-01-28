@@ -433,7 +433,12 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 	if b.Results == nil && len(keys) > len(b.resultsBuf) {
 		b.Results = make([]Result, 0, len(keys))
 	}
+	count := 0
 	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
@@ -446,15 +451,17 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 			b.initResult(0, 1, notRaw, err)
 			return
 		}
-		put := &puts[i]
+		put := &puts[count]
 		put.RequestHeader = roachpb.RequestHeader{
 			Key: key,
 		}
 		put.Value = v
-		reqs[i] = put
+		reqs[count] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 		b.initResult(1, 1, notRaw, nil)
+		count++
 	}
+	reqs = reqs[:count]
 	b.appendReqs(reqs...)
 }
 
@@ -464,7 +471,12 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 	if b.Results == nil && len(keys) > len(b.resultsBuf) {
 		b.Results = make([]Result, 0, len(keys))
 	}
+	count := 0
 	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
@@ -478,16 +490,18 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 			return
 		}
 		v.InitChecksum(key)
-		put := &puts[i]
+		put := &puts[count]
 		put.RequestHeader = roachpb.RequestHeader{
 			Key: key,
 		}
 		put.Value = v
 		put.FailOnTombstones = failOnTombstones
-		reqs[i] = put
+		reqs[count] = put
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 		b.initResult(1, 1, notRaw, nil)
+		count++
 	}
+	reqs = reqs[:count]
 	b.appendReqs(reqs...)
 }
 
@@ -581,6 +595,10 @@ func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 		b.Results = make([]Result, 0, len(keys))
 	}
 	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
 		k, err := marshalKey(key)
 		if err != nil {
 			b.initResult(0, 1, notRaw, err)
@@ -602,6 +620,33 @@ func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 		b.initResult(1, 1, notRaw, nil)
 	}
+	b.appendReqs(reqs...)
+}
+
+func (b *Batch) CPutValues(keys []roachpb.Key, values []roachpb.Value) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.ConditionalPutRequest, len(keys))
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
+	counter := 0
+	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
+		put := &puts[counter]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		v := values[i]
+		put.Value = v
+		reqs[counter] = &puts[counter]
+		b.approxMutationReqBytes += len(key) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
+		counter++
+	}
+	reqs = reqs[:counter]
 	b.appendReqs(reqs...)
 }
 

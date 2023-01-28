@@ -22,9 +22,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
+	"github.com/cockroachdb/errors"
 )
 
 type vectorInserter struct {
@@ -74,38 +76,51 @@ func (v *vectorInserter) Init(ctx context.Context) {
 	v.helper.Init()
 }
 
+func (v *vectorInserter) GetPartialIndexMap(b coldata.Batch) map[catid.IndexID]coldata.Bools {
+	var partialIndexColMap map[descpb.IndexID]coldata.Bools
+	// Create a set of partial index IDs to not write to. Indexes should not be
+	// written to when they are partial indexes and the row does not satisfy the
+	// predicate. This set is passed as a parameter to tableInserter.row below.
+	pindexes := v.helper.TableDesc.PartialIndexes()
+	if n := len(pindexes); n > 0 {
+		colOffset := len(v.insertCols) + v.checkOrds.Len()
+		numCols := len(b.ColVecs()) - colOffset
+		if numCols != len(pindexes) {
+			panic(errors.AssertionFailedf("num extra columns didn't match number of partial indexes"))
+		}
+		for i := 0; i < numCols; i++ {
+			if partialIndexColMap == nil {
+				partialIndexColMap = make(map[descpb.IndexID]coldata.Bools)
+			}
+			partialIndexColMap[pindexes[i].GetID()] = b.ColVec(i + colOffset).Bool()
+		}
+	}
+	return partialIndexColMap
+}
+
 func (v *vectorInserter) Next() coldata.Batch {
 	ctx := v.Ctx
 	b := v.Input.Next()
 	if b.Length() == 0 {
 		return coldata.ZeroBatch
 	}
-	// FIXME: figure out where to do kv trace, maybe wrap b in custom Putter interface?
-	kvb := v.flowCtx.Txn.NewBatch()
 
-	var partialIndexColMap map[descpb.IndexID]coldata.Bools
-	// FIXME: handle partial index predicates
-	// Create a set of partial index IDs to not write to. Indexes should not be
-	// written to when they are partial indexes and the row does not satisfy the
-	// predicate. This set is passed as a parameter to tableInserter.row below.
-	if n := len(v.helper.TableDesc.PartialIndexes()); n > 0 {
-		for i := len(v.insertCols) + v.checkOrds.Len(); i < len(b.ColVecs()); i++ {
-			if partialIndexColMap == nil {
-				partialIndexColMap = make(map[descpb.IndexID]coldata.Bools)
-			}
-		}
-	}
-
-	// FIXME: look at check constraint columns
 	if !v.checkOrds.Empty() {
 		if err := v.checkMutationInput(ctx, b); err != nil {
 			panic(err)
 		}
 	}
+	partialIndexColMap := v.GetPartialIndexMap(b)
+
+	kvb := v.flowCtx.Txn.NewBatch()
+	var p row.Putter = kvb
+	if v.flowCtx.TraceKV {
+		p = &tracePutter{p: kvb, ctx: ctx}
+	}
 	// FIXME:  allow InsertBatch to partially insert stuff and loop here til everything is done,
 	// if there are a ton of secondary indexes we could hit workmem limit building kv batch so we
 	// need to be able to do it in chunks of rows.
-	enc := colenc.MakeEncoder(&v.helper, b, kvb, v.insertColIDtoRowIndex, partialIndexColMap)
+	enc := colenc.MakeEncoder(&v.helper, b, p, v.insertColIDtoRowIndex, partialIndexColMap)
 	if err := enc.PrepareBatch(ctx); err != nil {
 		panic(err)
 	}
