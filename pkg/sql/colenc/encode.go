@@ -35,11 +35,12 @@ import (
 )
 
 type BatchEncoder struct {
-	rh             *row.RowHelper
-	b              coldata.Batch
-	p              row.Putter
-	colMap         catalog.TableColMap
-	partialIndexes map[descpb.IndexID]coldata.Bools
+	rh              *row.RowHelper
+	b               coldata.Batch
+	p               row.Putter
+	colMap          catalog.TableColMap
+	partialIndexes  map[descpb.IndexID]coldata.Bools
+	familyToColumns map[descpb.FamilyID][]rowenc.ValueEncodedColumn
 }
 
 func MakeEncoder(rh *row.RowHelper,
@@ -273,7 +274,7 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 	keyAndSuffixCols := b.rh.TableDesc.IndexFetchSpecKeyAndSuffixColumns(ind)
 	keyCols := keyAndSuffixCols[:ind.NumKeyColumns()]
 	count := b.b.Length()
-	// TODO: we should re-use these
+	// TODO: we should re-use these across indexes
 	kys := make([]roachpb.Key, count)
 	rowBufSize := 5*len(keyCols) + len(secondaryIndexKeyPrefix)
 	buffer := make([]byte, 0, count*rowBufSize)
@@ -303,7 +304,12 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 			return err
 		}
 	}
-
+	noFamilies := b.rh.TableDesc.NumFamilies() == 1 || ind.GetVersion() == descpb.BaseIndexFormatVersion
+	// Save length of base of key for reuse across families
+	var keyPrefixOffsets []int32
+	if !noFamilies {
+		keyPrefixOffsets = make([]int32, count)
+	}
 	for row := 0; row < count; row++ {
 		// Elided partial index keys will be nil.
 		if kys[row] == nil {
@@ -312,15 +318,20 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 		if !ind.IsUnique() || nulls.NullAtChecked(row) {
 			kys[row] = append(kys[row], extraKeys[row]...)
 		}
-		kys[row] = keys.MakeFamilyKey(kys[row], 0)
+		if !noFamilies {
+			keyPrefixOffsets[row] = int32(len(kys[row]))
+		}
 	}
 
-	if b.rh.TableDesc.NumFamilies() == 1 || ind.GetVersion() == descpb.BaseIndexFormatVersion {
+	if noFamilies {
 		if err := b.encodeSecondaryIndexNoFamilies(ind, kys, extraKeys); err != nil {
 			return err
 		}
 	} else {
-		// TODO: secondary index family support
+		familyToColumns := rowenc.MakeFamilyToColumnMap(ind, b.rh.TableDesc)
+		if err := b.encodeSecondaryIndexWithFamilies(familyToColumns, ind, kys, extraKeys, keyPrefixOffsets, rowBufSize); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -328,13 +339,17 @@ func (b *BatchEncoder) EncodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []roachpb.Key, extraKeyCols [][]byte) error {
 	var values [][]byte
 	var err error
+	for row := 0; row < b.b.Length(); row++ {
+		kys[row] = keys.MakeFamilyKey(kys[row], 0)
+	}
 	if ind.IsUnique() {
 		values = extraKeyCols
 	} else {
 		// TODO: make preallocated slices out of big slice
 		values = make([][]byte, b.b.Length())
 	}
-	values, err = b.writeColumnValues(kys, values, ind)
+	cols := rowenc.GetValueColumns(ind)
+	values, err = b.writeColumnValues(kys, values, ind, cols)
 	if err != nil {
 		return err
 	}
@@ -346,8 +361,86 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	return nil
 }
 
-func (b *BatchEncoder) writeColumnValues(kys []roachpb.Key, values [][]byte, ind catalog.Index) ([][]byte, error) {
-	cols := rowenc.GetValueColumns(ind)
+func (b *BatchEncoder) encodeSecondaryIndexWithFamilies(familyMap map[catid.FamilyID][]rowenc.ValueEncodedColumn,
+	ind catalog.Index, kys []roachpb.Key, extraKeyCols [][]byte,
+	keyPrefixOffsets []int32, rowBufSize int) error {
+	count := len(kys)
+	var values [][]byte
+	// TODO (rohany): is there a natural way of caching this information as well?
+	// We have to iterate over the map in sorted family order. Other parts of the code
+	// depend on a per-call consistent order of keys generated.
+	familyIDs := make([]int, 0, len(familyMap))
+	for familyID := range familyMap {
+		familyIDs = append(familyIDs, int(familyID))
+	}
+	sort.Ints(familyIDs)
+	for i, familyID := range familyIDs {
+		storedColsInFam := familyMap[descpb.FamilyID(familyID)]
+
+		// If we aren't storing any columns in this family and we are not the first family,
+		// skip onto the next family. We need to write family 0 no matter what to ensure
+		// that each row has at least one entry in the DB.
+		if len(storedColsInFam) == 0 && familyID != 0 {
+			continue
+		}
+		sort.Sort(rowenc.ByID(storedColsInFam))
+
+		// reset keys for new family
+		if i > 0 {
+			buffer := make([]byte, 0, count*rowBufSize)
+			newkys := make([]roachpb.Key, count)
+			for row, counter := 0, 0; row < count; row++ {
+				// Elided partial index keys will be nil.
+				if kys[row] == nil {
+					continue
+				}
+				offset := counter * rowBufSize
+				newkys[row] = buffer[offset : offset : rowBufSize+offset]
+				newkys[row] = append(newkys[row], kys[row][:keyPrefixOffsets[row]]...)
+				counter++
+			}
+			kys = newkys
+		}
+		for row := 0; row < len(kys); row++ {
+			kys[row] = keys.MakeFamilyKey(kys[row], uint32(familyID))
+		}
+		if ind.IsUnique() {
+			values = extraKeyCols
+		} else {
+			// TODO: make preallocated slices out of big slice
+			values = make([][]byte, b.b.Length())
+		}
+		var err error
+		values, err = b.writeColumnValues(kys, values, ind, storedColsInFam)
+		if err != nil {
+			return err
+		}
+		for row := 0; row < len(kys); row++ {
+			if familyID != 0 && len(values[row]) == 0 /* && !includeEmpty */ {
+				kys[row] = nil
+				continue
+			}
+		}
+		if familyID == 0 {
+			if ind.ForcePut() {
+				b.p.PutBytes(kys, values)
+			} else {
+				b.p.InitPutBytes(kys, values, false)
+			}
+		} else {
+			if ind.ForcePut() {
+				b.p.PutTuples(kys, values)
+			} else {
+				b.p.InitPutTuples(kys, values, false /*failOnTombstones*/)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BatchEncoder) writeColumnValues(kys []roachpb.Key, values [][]byte, ind catalog.Index,
+	cols []rowenc.ValueEncodedColumn) ([][]byte, error) {
 	var err error
 	count := b.b.Length()
 	lastColIDs := make([]catid.ColumnID, count)

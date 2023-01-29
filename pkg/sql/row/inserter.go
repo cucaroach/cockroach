@@ -102,7 +102,7 @@ func insertDelFn(ctx context.Context, b Putter, key *roachpb.Key, traceKV bool) 
 	b.Del(key)
 }
 
-// insertPutFn is used by insertRow when conflicts should be ignored.
+// insertInvertedPutFn is used by insertRow when conflicts should be ignored.
 func insertInvertedPutFn(
 	ctx context.Context, b Putter, key *roachpb.Key, value *roachpb.Value, traceKV bool,
 ) {
@@ -122,6 +122,8 @@ type Putter interface {
 	CPutTuples(kys []roachpb.Key, values [][]byte)
 	PutBytes(kys []roachpb.Key, values [][]byte)
 	InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool)
+	PutTuples(kys []roachpb.Key, values [][]byte)
+	InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTombstones bool)
 }
 
 // InsertRow adds to the batch the kv operations necessary to insert a table row

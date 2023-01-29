@@ -505,6 +505,84 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombston
 	b.appendReqs(reqs...)
 }
 
+func (b *Batch) PutTuples(keys []roachpb.Key, values [][]byte) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.PutRequest, len(keys))
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
+	count := 0
+	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
+		k, err := marshalKey(key)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		var v roachpb.Value
+		v.SetTuple(values[i])
+		v, err = marshalValue(&v)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		put := &puts[count]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		put.Value = v
+		reqs[count] = put
+		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
+		count++
+	}
+	reqs = reqs[:count]
+	b.appendReqs(reqs...)
+}
+
+func (b *Batch) InitPutTuples(keys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+	reqs := make([]roachpb.Request, len(keys))
+	puts := make([]roachpb.InitPutRequest, len(keys))
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
+	count := 0
+	for i, key := range keys {
+		// Partial index keys that were elided will be nil.
+		if key == nil {
+			continue
+		}
+		k, err := marshalKey(key)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		var v roachpb.Value
+		v.SetTuple(values[i])
+		v, err = marshalValue(&v)
+		if err != nil {
+			b.initResult(0, 1, notRaw, err)
+			return
+		}
+		v.InitChecksum(key)
+		put := &puts[count]
+		put.RequestHeader = roachpb.RequestHeader{
+			Key: key,
+		}
+		put.Value = v
+		put.FailOnTombstones = failOnTombstones
+		reqs[count] = put
+		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+		b.initResult(1, 1, notRaw, nil)
+		count++
+	}
+	reqs = reqs[:count]
+	b.appendReqs(reqs...)
+}
+
 // PutInline sets the value for a key, but does not maintain
 // multi-version values. The most recent value is always overwritten.
 // Inline values cannot be mutated transactionally and should be used

@@ -1,4 +1,4 @@
-// Copyright 2018 The Cockroach Authors.
+// Copyright 2023 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -43,6 +43,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestEncoderEquality tests that the vector encoder and the row based encoder
+// produce the exact same KV batches. Check constraints and partial indexes
+// are left to copy datadriven tests so we don't have to muck with generating
+// predicate columns.
 func TestEncoderEquality(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -58,6 +62,12 @@ func TestEncoderEquality(t *testing.T) {
 		ddl    string
 		datums tree.Datums
 	}{
+		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), INDEX(k,i), FAMILY(j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
+
+		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), INDEX(k,i), FAMILY(j),FAMILY(k)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
+
+		{"i INT PRIMARY KEY, a BOOL, b BOOL, c BOOL, INDEX(c,b,a), FAMILY(a),  FAMILY(b), FAMILY(c)", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
+
 		// Test some weird datums
 		{"i INT PRIMARY KEY, bi BIT, n NAME, ine INET", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
 
@@ -250,7 +260,6 @@ func printKeys(kys []roachpb.Key) string {
 	return buf.String()
 }
 
-// TODO: partial indexes
 // TODO: checkMutationInput
 // TODO: tryDoResponseAdmission
 
@@ -309,7 +318,7 @@ func (c *capturePutter) CPutValues(kys []roachpb.Key, values []roachpb.Value) {
 	}
 }
 
-// we don't call these
+// we don't call this
 func (c *capturePutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	panic("unimplemented")
 }
@@ -321,6 +330,22 @@ func (c *capturePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnT
 		c.kvs.Keys = append(c.kvs.Keys, k)
 		var kvValue roachpb.Value
 		kvValue.SetBytes(values[i])
+		c.kvs.Values = append(c.kvs.Values, kvValue.RawBytes)
+	}
+}
+
+// we don't call this
+func (c *capturePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
+	panic("unimplemented")
+}
+func (c *capturePutter) InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+	for i, k := range kys {
+		if k == nil {
+			continue
+		}
+		c.kvs.Keys = append(c.kvs.Keys, k)
+		var kvValue roachpb.Value
+		kvValue.SetTuple(values[i])
 		c.kvs.Values = append(c.kvs.Values, kvValue.RawBytes)
 	}
 }

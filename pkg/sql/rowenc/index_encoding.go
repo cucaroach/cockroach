@@ -509,13 +509,13 @@ type ValueEncodedColumn struct {
 	isComposite bool
 }
 
-// byID implements sort.Interface for []valueEncodedColumn based on the id
+// ByID implements sort.Interface for []valueEncodedColumn based on the id
 // field.
-type byID []ValueEncodedColumn
+type ByID []ValueEncodedColumn
 
-func (a byID) Len() int           { return len(a) }
-func (a byID) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a byID) Less(i, j int) bool { return a[i].Id < a[j].Id }
+func (a ByID) Len() int           { return len(a) }
+func (a ByID) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByID) Less(i, j int) bool { return a[i].Id < a[j].Id }
 
 // EncodeInvertedIndexKeys creates a list of inverted index keys by
 // concatenating keyPrefix with the encodings of the column in the
@@ -1108,7 +1108,7 @@ func EncodePrimaryIndex(
 				}
 			}
 		}
-		sort.Sort(byID(columnsToEncode))
+		sort.Sort(ByID(columnsToEncode))
 		entryValue, err = writeColumnValues(entryValue, colMap, values, columnsToEncode)
 		if err != nil {
 			return err
@@ -1261,31 +1261,7 @@ func EncodeSecondaryIndex(
 			// TODO (rohany): we want to share this information across calls to EncodeSecondaryIndex --
 			//  its not easy to do this right now. It would be nice if the index descriptor or table descriptor
 			//  had this information computed/cached for us.
-			familyToColumns := make(map[descpb.FamilyID][]ValueEncodedColumn)
-			addToFamilyColMap := func(id descpb.FamilyID, column ValueEncodedColumn) {
-				if _, ok := familyToColumns[id]; !ok {
-					familyToColumns[id] = []ValueEncodedColumn{}
-				}
-				familyToColumns[id] = append(familyToColumns[id], column)
-			}
-			// Ensure that column family 0 always generates a k/v pair.
-			familyToColumns[0] = []ValueEncodedColumn{}
-			// All composite columns are stored in family 0.
-			for i := 0; i < secondaryIndex.NumCompositeColumns(); i++ {
-				id := secondaryIndex.GetCompositeColumnID(i)
-				addToFamilyColMap(0, ValueEncodedColumn{Id: id, isComposite: true})
-			}
-			_ = tableDesc.ForeachFamily(func(family *descpb.ColumnFamilyDescriptor) error {
-				for i := 0; i < secondaryIndex.NumSecondaryStoredColumns(); i++ {
-					id := secondaryIndex.GetStoredColumnID(i)
-					for _, col := range family.ColumnIDs {
-						if id == col {
-							addToFamilyColMap(family.ID, ValueEncodedColumn{Id: id, isComposite: false})
-						}
-					}
-				}
-				return nil
-			})
+			familyToColumns := MakeFamilyToColumnMap(secondaryIndex, tableDesc)
 			entries, err = encodeSecondaryIndexWithFamilies(
 				familyToColumns, secondaryIndex, colMap, key, values, extraKey, entries, includeEmpty)
 			if err != nil {
@@ -1301,6 +1277,35 @@ func EncodeSecondaryIndex(
 	}
 
 	return entries, nil
+}
+
+func MakeFamilyToColumnMap(secondaryIndex catalog.Index, tableDesc catalog.TableDescriptor) map[descpb.FamilyID][]ValueEncodedColumn {
+	familyToColumns := make(map[descpb.FamilyID][]ValueEncodedColumn)
+	addToFamilyColMap := func(id descpb.FamilyID, column ValueEncodedColumn) {
+		if _, ok := familyToColumns[id]; !ok {
+			familyToColumns[id] = []ValueEncodedColumn{}
+		}
+		familyToColumns[id] = append(familyToColumns[id], column)
+	}
+	// Ensure that column family 0 always generates a k/v pair.
+	familyToColumns[0] = []ValueEncodedColumn{}
+	// All composite columns are stored in family 0.
+	for i := 0; i < secondaryIndex.NumCompositeColumns(); i++ {
+		id := secondaryIndex.GetCompositeColumnID(i)
+		addToFamilyColMap(0, ValueEncodedColumn{Id: id, isComposite: true})
+	}
+	_ = tableDesc.ForeachFamily(func(family *descpb.ColumnFamilyDescriptor) error {
+		for i := 0; i < secondaryIndex.NumSecondaryStoredColumns(); i++ {
+			id := secondaryIndex.GetStoredColumnID(i)
+			for _, col := range family.ColumnIDs {
+				if id == col {
+					addToFamilyColMap(family.ID, ValueEncodedColumn{Id: id, isComposite: false})
+				}
+			}
+		}
+		return nil
+	})
+	return familyToColumns
 }
 
 // encodeSecondaryIndexWithFamilies generates a k/v pair for
@@ -1344,7 +1349,7 @@ func encodeSecondaryIndexWithFamilies(
 			continue
 		}
 
-		sort.Sort(byID(storedColsInFam))
+		sort.Sort(ByID(storedColsInFam))
 
 		key = keys.MakeFamilyKey(key, uint32(familyID))
 		if index.IsUnique() && familyID == 0 {
@@ -1440,7 +1445,7 @@ func GetValueColumns(index catalog.Index) []ValueEncodedColumn {
 		}
 		cols = append(cols, ValueEncodedColumn{Id: id, isComposite: true})
 	}
-	sort.Sort(byID(cols))
+	sort.Sort(ByID(cols))
 	return cols
 }
 
