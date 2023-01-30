@@ -177,7 +177,7 @@ type ValueHandler interface {
 	Reset()
 }
 
-func ParseAndRequireStringEx(t *types.T, s string, ctx ParseTimeContext, vh ValueHandler, ph *pgdate.ParseHelper) (err error) {
+func ParseAndRequireStringEx(t *types.T, s string, ctx ParseContext, vh ValueHandler, ph *pgdate.ParseHelper) (err error) {
 	switch t.Family() {
 	case types.BoolFamily:
 		var b bool
