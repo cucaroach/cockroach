@@ -121,9 +121,9 @@ type Putter interface {
 	CPutValues(kys []roachpb.Key, values []roachpb.Value)
 	CPutTuples(kys []roachpb.Key, values [][]byte)
 	PutBytes(kys []roachpb.Key, values [][]byte)
-	InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool)
+	InitPutBytes(kys []roachpb.Key, values [][]byte)
 	PutTuples(kys []roachpb.Key, values [][]byte)
-	InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTombstones bool)
+	InitPutTuples(kys []roachpb.Key, values [][]byte)
 }
 
 // InsertRow adds to the batch the kv operations necessary to insert a table row

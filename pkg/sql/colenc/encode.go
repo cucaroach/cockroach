@@ -380,7 +380,7 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	if ind.ForcePut() {
 		b.p.PutBytes(kys, values)
 	} else {
-		b.p.InitPutBytes(kys, values, false)
+		b.p.InitPutBytes(kys, values)
 	}
 	return nil
 }
@@ -449,13 +449,13 @@ func (b *BatchEncoder) encodeSecondaryIndexWithFamilies(familyMap map[catid.Fami
 			if ind.ForcePut() {
 				b.p.PutBytes(kys, values)
 			} else {
-				b.p.InitPutBytes(kys, values, false)
+				b.p.InitPutBytes(kys, values)
 			}
 		} else {
 			if ind.ForcePut() {
 				b.p.PutTuples(kys, values)
 			} else {
-				b.p.InitPutTuples(kys, values, false /*failOnTombstones*/)
+				b.p.InitPutTuples(kys, values)
 			}
 		}
 	}

@@ -427,160 +427,45 @@ func (b *Batch) Put(key, value interface{}) {
 	b.put(key, value, false)
 }
 
+// PutBytes allows multiple Bytes value type puts to be added to the batch.
 func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
-	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.PutRequest, len(keys))
-	if b.Results == nil && len(keys) > len(b.resultsBuf) {
-		b.Results = make([]Result, 0, len(keys))
-	}
-	count := 0
-	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
-		if key == nil {
-			continue
-		}
-		k, err := marshalKey(key)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		var v roachpb.Value
-		v.SetBytes(values[i])
-		v, err = marshalValue(&v)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		put := &puts[count]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		put.Value = v
-		reqs[count] = put
-		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-		b.initResult(1, 1, notRaw, nil)
-		count++
-	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+	reqs := make([]roachpb.PutRequest, len(keys))
+	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+		pr := &reqs[i]
+		pr.Value.SetBytes(v)
+		return pr, len(pr.Value.RawBytes)
+	})
 }
 
-func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte, failOnTombstones bool) {
-	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.InitPutRequest, len(keys))
-	if b.Results == nil && len(keys) > len(b.resultsBuf) {
-		b.Results = make([]Result, 0, len(keys))
-	}
-	count := 0
-	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
-		if key == nil {
-			continue
-		}
-		k, err := marshalKey(key)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		var v roachpb.Value
-		v.SetBytes(values[i])
-		v, err = marshalValue(&v)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		v.InitChecksum(key)
-		put := &puts[count]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		put.Value = v
-		put.FailOnTombstones = failOnTombstones
-		reqs[count] = put
-		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-		b.initResult(1, 1, notRaw, nil)
-		count++
-	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+// InitPutBytes allows multiple Bytes value type puts to be added to the batch.
+func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte) {
+	reqs := make([]roachpb.InitPutRequest, len(keys))
+	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+		pr := &reqs[i]
+		pr.Value.SetBytes(v)
+		return pr, len(pr.Value.RawBytes)
+	})
 }
 
+// PutTuples allows multiple tuple value type puts to be added to the batch.
 func (b *Batch) PutTuples(keys []roachpb.Key, values [][]byte) {
-	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.PutRequest, len(keys))
-	if b.Results == nil && len(keys) > len(b.resultsBuf) {
-		b.Results = make([]Result, 0, len(keys))
-	}
-	count := 0
-	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
-		if key == nil {
-			continue
-		}
-		k, err := marshalKey(key)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		var v roachpb.Value
-		v.SetTuple(values[i])
-		v, err = marshalValue(&v)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		put := &puts[count]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		put.Value = v
-		reqs[count] = put
-		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-		b.initResult(1, 1, notRaw, nil)
-		count++
-	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+	reqs := make([]roachpb.PutRequest, len(keys))
+	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+		pr := &reqs[i]
+		pr.Value.SetTuple(v)
+		return pr, len(pr.Value.RawBytes)
+	})
 }
 
-func (b *Batch) InitPutTuples(keys []roachpb.Key, values [][]byte, failOnTombstones bool) {
-	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.InitPutRequest, len(keys))
-	if b.Results == nil && len(keys) > len(b.resultsBuf) {
-		b.Results = make([]Result, 0, len(keys))
-	}
-	count := 0
-	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
-		if key == nil {
-			continue
-		}
-		k, err := marshalKey(key)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		var v roachpb.Value
-		v.SetTuple(values[i])
-		v, err = marshalValue(&v)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		v.InitChecksum(key)
-		put := &puts[count]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		put.Value = v
-		put.FailOnTombstones = failOnTombstones
-		reqs[count] = put
-		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-		b.initResult(1, 1, notRaw, nil)
-		count++
-	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+// InitPutTuples allows multiple tuple value type init puts to be added to the
+// batch.
+func (b *Batch) InitPutTuples(keys []roachpb.Key, values [][]byte) {
+	reqs := make([]roachpb.InitPutRequest, len(keys))
+	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+		pr := &reqs[i]
+		pr.Value.SetTuple(v)
+		return pr, len(pr.Value.RawBytes)
+	})
 }
 
 // PutInline sets the value for a key, but does not maintain
@@ -666,65 +551,39 @@ func (b *Batch) cputInternal(
 	b.initResult(1, 1, notRaw, nil)
 }
 
+// CPutTuples allows multiple ConditionalPutRequests to be added to the batch
+// as tuples.
 func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
-	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.ConditionalPutRequest, len(keys))
-	if b.Results == nil && len(keys) > len(b.resultsBuf) {
-		b.Results = make([]Result, 0, len(keys))
-	}
-	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
-		if key == nil {
-			continue
-		}
-		k, err := marshalKey(key)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		var v roachpb.Value
-		v.SetTuple(values[i])
-		v, err = marshalValue(&v)
-		if err != nil {
-			b.initResult(0, 1, notRaw, err)
-			return
-		}
-		put := &puts[i]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		put.Value = v
-		reqs[i] = &puts[i]
-		b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-		b.initResult(1, 1, notRaw, nil)
-	}
-	b.appendReqs(reqs...)
+	reqs := make([]roachpb.ConditionalPutRequest, len(keys))
+	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+		pr := &reqs[i]
+		pr.Value.SetTuple(v)
+		return pr, len(pr.Value.RawBytes)
+	})
 }
 
+// CPutValues allows multiple ConditionalPutRequests to be added to the batch.
 func (b *Batch) CPutValues(keys []roachpb.Key, values []roachpb.Value) {
+	cputs := make([]roachpb.ConditionalPutRequest, len(keys))
 	reqs := make([]roachpb.Request, len(keys))
-	puts := make([]roachpb.ConditionalPutRequest, len(keys))
 	if b.Results == nil && len(keys) > len(b.resultsBuf) {
 		b.Results = make([]Result, 0, len(keys))
 	}
-	counter := 0
+	count := 0
 	for i, key := range keys {
-		// Partial index keys that were elided will be nil.
+		// Ignore nil keys
 		if key == nil {
 			continue
 		}
-		put := &puts[counter]
-		put.RequestHeader = roachpb.RequestHeader{
-			Key: key,
-		}
-		v := values[i]
-		put.Value = v
-		reqs[counter] = &puts[counter]
-		b.approxMutationReqBytes += len(key) + len(v.RawBytes)
+		cput := &cputs[count]
+		cput.RequestHeader.Key = key
+		cput.Value.RawBytes = values[i].RawBytes
+		reqs[count] = cput
+		b.approxMutationReqBytes += len(key) + len(cput.Value.RawBytes)
 		b.initResult(1, 1, notRaw, nil)
-		counter++
+		count++
 	}
-	reqs = reqs[:counter]
+	reqs = reqs[:count]
 	b.appendReqs(reqs...)
 }
 
@@ -1125,4 +984,27 @@ func (b *Batch) barrier(s, e interface{}) {
 	}
 	b.appendReqs(req)
 	b.initResult(1, 0, notRaw, nil)
+}
+
+func (b *Batch) bulkRequest(keys []roachpb.Key, values [][]byte,
+	valFactory func(int, []byte) (roachpb.Request, int),
+) {
+	reqs := make([]roachpb.Request, len(keys))
+	if b.Results == nil && len(keys) > len(b.resultsBuf) {
+		b.Results = make([]Result, 0, len(keys))
+	}
+	count := 0
+	for i, key := range keys {
+		// Ignore nil keys
+		if key == nil {
+			continue
+		}
+		var numBytes int
+		reqs[count], numBytes = valFactory(count, values[i])
+		b.approxMutationReqBytes += len(key) + numBytes
+		b.initResult(1, 1, notRaw, nil)
+		count++
+	}
+	reqs = reqs[:count]
+	b.appendReqs(reqs...)
 }

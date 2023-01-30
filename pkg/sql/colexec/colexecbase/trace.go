@@ -75,7 +75,7 @@ func (t *tracePutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	t.p.PutBytes(kys, values)
 
 }
-func (t *tracePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+func (t *tracePutter) InitPutBytes(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
 		if k != nil {
 			var v roachpb.Value
@@ -83,7 +83,7 @@ func (t *tracePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTom
 			log.VEventfDepth(t.ctx, 1, 2, "InitPut %v -> %v", k, v.PrettyPrint())
 		}
 	}
-	t.p.InitPutBytes(kys, values, failOnTombstones)
+	t.p.InitPutBytes(kys, values)
 }
 
 func (t *tracePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
@@ -97,7 +97,7 @@ func (t *tracePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
 	t.p.PutTuples(kys, values)
 
 }
-func (t *tracePutter) InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+func (t *tracePutter) InitPutTuples(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
 		if k != nil {
 			var v roachpb.Value
@@ -105,5 +105,5 @@ func (t *tracePutter) InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTo
 			log.VEventfDepth(t.ctx, 1, 2, "InitPut %v -> %v", k, v.PrettyPrint())
 		}
 	}
-	t.p.InitPutTuples(kys, values, failOnTombstones)
+	t.p.InitPutTuples(kys, values)
 }

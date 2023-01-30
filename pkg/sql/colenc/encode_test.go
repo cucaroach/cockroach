@@ -334,7 +334,7 @@ func (c *capturePutter) CPutValues(kys []roachpb.Key, values []roachpb.Value) {
 func (c *capturePutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	panic("unimplemented")
 }
-func (c *capturePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+func (c *capturePutter) InitPutBytes(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
 		if k == nil {
 			continue
@@ -350,7 +350,7 @@ func (c *capturePutter) InitPutBytes(kys []roachpb.Key, values [][]byte, failOnT
 func (c *capturePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
 	panic("unimplemented")
 }
-func (c *capturePutter) InitPutTuples(kys []roachpb.Key, values [][]byte, failOnTombstones bool) {
+func (c *capturePutter) InitPutTuples(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
 		if k == nil {
 			continue
