@@ -547,3 +547,31 @@ CPut /Table/<>/1/-1/0 -> /TUPLE/
 CPut /Table/<>/1/0/0 -> /TUPLE/
 CPut /Table/<>/1/1/0 -> /TUPLE/
 InitPut /Table/<>/2/1/0 -> /BYTES/
+
+exec-ddl
+CREATE TABLE tpartial2 (i INT PRIMARY KEY, b INT, index(b) WHERE i > 0, FAMILY(i), FAMILY(b))
+----
+
+# Unfortunately we have to do the inserts 1 row at a time because the row inserter does it
+# that way and the vector inserter  doesn't.
+copy-kvtrace
+COPY tpartial2 FROM STDIN
+-1	-2
+----
+CPut /Table/<>/1/-1/0 -> /TUPLE/
+CPut /Table/<>/1/-1/1/1 -> /INT/-2
+
+copy-kvtrace
+COPY tpartial2 FROM STDIN
+0	0
+----
+CPut /Table/<>/1/0/0 -> /TUPLE/
+CPut /Table/<>/1/0/1/1 -> /INT/0
+
+copy-kvtrace
+COPY tpartial2 FROM STDIN
+1	2
+----
+CPut /Table/<>/1/1/0 -> /TUPLE/
+CPut /Table/<>/1/1/1/1 -> /INT/2
+InitPut /Table/<>/2/2/1/0 -> /BYTES/

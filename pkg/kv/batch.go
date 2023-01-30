@@ -430,8 +430,9 @@ func (b *Batch) Put(key, value interface{}) {
 // PutBytes allows multiple Bytes value type puts to be added to the batch.
 func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.PutRequest, len(keys))
-	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+	b.bulkRequest(keys, values, func(i int, k roachpb.Key, v []byte) (roachpb.Request, int) {
 		pr := &reqs[i]
+		pr.RequestHeader.Key = k
 		pr.Value.SetBytes(v)
 		return pr, len(pr.Value.RawBytes)
 	})
@@ -440,8 +441,9 @@ func (b *Batch) PutBytes(keys []roachpb.Key, values [][]byte) {
 // InitPutBytes allows multiple Bytes value type puts to be added to the batch.
 func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.InitPutRequest, len(keys))
-	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+	b.bulkRequest(keys, values, func(i int, k roachpb.Key, v []byte) (roachpb.Request, int) {
 		pr := &reqs[i]
+		pr.RequestHeader.Key = k
 		pr.Value.SetBytes(v)
 		return pr, len(pr.Value.RawBytes)
 	})
@@ -450,8 +452,9 @@ func (b *Batch) InitPutBytes(keys []roachpb.Key, values [][]byte) {
 // PutTuples allows multiple tuple value type puts to be added to the batch.
 func (b *Batch) PutTuples(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.PutRequest, len(keys))
-	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+	b.bulkRequest(keys, values, func(i int, k roachpb.Key, v []byte) (roachpb.Request, int) {
 		pr := &reqs[i]
+		pr.RequestHeader.Key = k
 		pr.Value.SetTuple(v)
 		return pr, len(pr.Value.RawBytes)
 	})
@@ -461,8 +464,9 @@ func (b *Batch) PutTuples(keys []roachpb.Key, values [][]byte) {
 // batch.
 func (b *Batch) InitPutTuples(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.InitPutRequest, len(keys))
-	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+	b.bulkRequest(keys, values, func(i int, k roachpb.Key, v []byte) (roachpb.Request, int) {
 		pr := &reqs[i]
+		pr.RequestHeader.Key = k
 		pr.Value.SetTuple(v)
 		return pr, len(pr.Value.RawBytes)
 	})
@@ -555,8 +559,9 @@ func (b *Batch) cputInternal(
 // as tuples.
 func (b *Batch) CPutTuples(keys []roachpb.Key, values [][]byte) {
 	reqs := make([]roachpb.ConditionalPutRequest, len(keys))
-	b.bulkRequest(keys, values, func(i int, v []byte) (roachpb.Request, int) {
+	b.bulkRequest(keys, values, func(i int, k roachpb.Key, v []byte) (roachpb.Request, int) {
 		pr := &reqs[i]
+		pr.RequestHeader.Key = k
 		pr.Value.SetTuple(v)
 		return pr, len(pr.Value.RawBytes)
 	})
@@ -583,8 +588,10 @@ func (b *Batch) CPutValues(keys []roachpb.Key, values []roachpb.Value) {
 		b.initResult(1, 1, notRaw, nil)
 		count++
 	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+	if count > 0 {
+		reqs = reqs[:count]
+		b.appendReqs(reqs...)
+	}
 }
 
 // InitPut sets the first value for a key to value. An ConditionFailedError is
@@ -987,7 +994,7 @@ func (b *Batch) barrier(s, e interface{}) {
 }
 
 func (b *Batch) bulkRequest(keys []roachpb.Key, values [][]byte,
-	valFactory func(int, []byte) (roachpb.Request, int),
+	valFactory func(int, roachpb.Key, []byte) (roachpb.Request, int),
 ) {
 	reqs := make([]roachpb.Request, len(keys))
 	if b.Results == nil && len(keys) > len(b.resultsBuf) {
@@ -1000,11 +1007,13 @@ func (b *Batch) bulkRequest(keys []roachpb.Key, values [][]byte,
 			continue
 		}
 		var numBytes int
-		reqs[count], numBytes = valFactory(count, values[i])
+		reqs[count], numBytes = valFactory(count, key, values[i])
 		b.approxMutationReqBytes += len(key) + numBytes
 		b.initResult(1, 1, notRaw, nil)
 		count++
 	}
-	reqs = reqs[:count]
-	b.appendReqs(reqs...)
+	if count > 0 {
+		reqs = reqs[:count]
+		b.appendReqs(reqs...)
+	}
 }

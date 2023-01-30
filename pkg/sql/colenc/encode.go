@@ -364,6 +364,10 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	var values [][]byte
 	var err error
 	for row := 0; row < b.b.Length(); row++ {
+		// Elided partial index keys will be nil.
+		if kys[row] == nil {
+			continue
+		}
 		kys[row] = keys.MakeFamilyKey(kys[row], 0)
 	}
 	if ind.IsUnique() {
@@ -426,6 +430,9 @@ func (b *BatchEncoder) encodeSecondaryIndexWithFamilies(familyMap map[catid.Fami
 			kys = newkys
 		}
 		for row := 0; row < len(kys); row++ {
+			if kys[row] == nil {
+				continue
+			}
 			kys[row] = keys.MakeFamilyKey(kys[row], uint32(familyID))
 		}
 		if ind.IsUnique() {
