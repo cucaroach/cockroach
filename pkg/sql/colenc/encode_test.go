@@ -56,23 +56,41 @@ func TestEncoderEquality(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	db.Exec("CREATE TYPE c AS (a INT, b INT)")
+	compDec, err := tree.ParseDDecimal("-0")
+	require.NoError(t, err)
+
+	colString, err := tree.NewDCollatedString("asdf", "en", &tree.CollationEnvironment{})
+	require.NoError(t, err)
+
 	rng, _ := randutil.NewTestRand()
 	sv := &s.ClusterSettings().SV
 	for _, tc := range []struct {
 		ddl    string
 		datums tree.Datums
 	}{
+		// TODO: array types
+		// TODO: tuples
+		// TODO: tsvector
+		// TODO: covering secondary indexes
+
+		// composite encoded types
+		{"d DECIMAL, PRIMARY KEY (d ASC)", []tree.Datum{compDec}},
+		{"f FLOAT8, PRIMARY KEY (f ASC)", []tree.Datum{tree.NewDFloat(-0)}},
+		{"a STRING COLLATE en, PRIMARY KEY (a)", []tree.Datum{colString}},
+
+		{"i INT PRIMARY KEY, bi BIT, n NAME, ine INET, INDEX(i) STORING (bi,n,ine)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
+
 		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), INDEX(k,i), FAMILY(j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
+
+		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), INDEX(k,i), FAMILY(j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
+		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), UNIQUE INDEX(k,i), FAMILY(j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
 
 		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j), INDEX(k,i), FAMILY(j),FAMILY(k)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
 
-		{"i INT PRIMARY KEY, a BOOL, b BOOL, c BOOL, INDEX(c,b,a), FAMILY(a),  FAMILY(b), FAMILY(c)", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
-
 		// Test some weird datums
 		{"i INT PRIMARY KEY, bi BIT, n NAME, ine INET", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
+		{"i INT PRIMARY KEY, bi BIT, n NAME, ine INET UNIQUE", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.VarBit), randgen.RandDatumSimple(rng, types.Name), randgen.RandDatumSimple(rng, types.INet)}},
 
-		// I'm not doing this right, it crashes in the row encoder...
-		//{"i INT PRIMARY KEY, c c", []tree.Datum{tree.NewDInt(1234), tree.NewDTupleWithLen(types.Int, 2)}},
 		{"i INT PRIMARY KEY, j JSON, k INT,INVERTED INDEX (k,j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json), randgen.RandDatumSimple(rng, types.Int)}},
 		{"i INT PRIMARY KEY, j JSON, INVERTED INDEX (j)", []tree.Datum{tree.NewDInt(1234), randgen.RandDatumSimple(rng, types.Json)}},
 		// Key encoding of vector types, both directions
@@ -84,6 +102,7 @@ func TestEncoderEquality(t *testing.T) {
 		{"d DATE, PRIMARY KEY (d DESC)", []tree.Datum{tree.NewDDate(pgdate.MakeCompatibleDateFromDisk(314159))}},
 		{"f FLOAT8, PRIMARY KEY (f ASC)", []tree.Datum{tree.NewDFloat(1.234)}},
 		{"f FLOAT8, PRIMARY KEY (f DESC)", []tree.Datum{tree.NewDFloat(1.234)}},
+		{"f FLOAT8, PRIMARY KEY (f ASC)", []tree.Datum{tree.NewDFloat(-0)}},
 		{"d DECIMAL, PRIMARY KEY (d ASC)", []tree.Datum{&tree.DDecimal{Decimal: *apd.New(123, 2)}}},
 		{"d DECIMAL, PRIMARY KEY (d DESC)", []tree.Datum{&tree.DDecimal{Decimal: *apd.New(123, 2)}}},
 
@@ -134,6 +153,7 @@ func TestEncoderEquality(t *testing.T) {
 		{"i INT PRIMARY KEY, a BOOL, b BOOL, c BOOL, FAMILY(a,b), FAMILY(c)", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
 		{"i INT PRIMARY KEY, a BOOL, b BOOL, c BOOL, FAMILY(a,b,c)", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
 		{"i INT PRIMARY KEY, a BOOL, b BOOL, c BOOL", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
+		{"i INT PRIMARY KEY, a BOOL, b BOOL UNIQUE, c BOOL, INDEX(c,b,a), FAMILY(a),  FAMILY(b), FAMILY(c)", []tree.Datum{tree.NewDInt(1234), tree.DBoolFalse, tree.DBoolTrue, tree.DNull}},
 		{"i INT PRIMARY KEY, a INT, b INT, c INT, d INT, e INT, f INT", []tree.Datum{tree.NewDInt(1234), tree.NewDInt(1), tree.NewDInt(0), tree.NewDInt(-1), tree.NewDInt(math.MaxInt64), tree.NewDInt(math.MinInt64), tree.DNull}},
 		{"i INT PRIMARY KEY, a FLOAT8, b FLOAT8, c FLOAT8, d FLOAT8", []tree.Datum{tree.NewDInt(1234), tree.DNaNFloat, tree.NewDFloat(0.0), tree.NewDFloat(math.MaxFloat64), tree.DNull}},
 		{"i INT PRIMARY KEY, d DATE, e DATE", []tree.Datum{tree.NewDInt(1234), tree.NewDDate(pgdate.MakeCompatibleDateFromDisk(314159)), tree.DNull}},
@@ -144,14 +164,6 @@ func TestEncoderEquality(t *testing.T) {
 		{"i INT PRIMARY KEY, b TIMESTAMP", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 		{"i INT PRIMARY KEY, b TIMESTAMPTZ", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
 		{"i INT PRIMARY KEY, b INTERVAL", []tree.Datum{tree.NewDInt(1234), tree.DNull}},
-
-		// TODO: composite types
-		// TODO: ignore indexes
-		// TODO: unique indexes
-		// TODO: array types
-		// TODO: tuples
-		// TODO: tsvector
-		// TODO: covering secondary indexes
 	} {
 		r := sqlutils.MakeSQLRunner(db)
 		// Create table, insert primary key since we're not including special rows like rowid.

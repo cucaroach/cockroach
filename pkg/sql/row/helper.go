@@ -241,22 +241,22 @@ func (rh *RowHelper) encodeSecondaryIndexes(
 // datums are considered too, so a composite datum in a PK will return false.
 func (rh *RowHelper) SkipColumnNotInPrimaryIndexValue(
 	colID descpb.ColumnID, value tree.Datum,
-) (bool, error) {
+) bool {
 	if rh.primaryIndexKeyCols.Empty() {
 		rh.primaryIndexKeyCols = rh.TableDesc.GetPrimaryIndex().CollectKeyColumnIDs()
 		rh.primaryIndexValueCols = rh.TableDesc.GetPrimaryIndex().CollectPrimaryStoredColumnIDs()
 	}
 	if !rh.primaryIndexKeyCols.Contains(colID) {
-		return !rh.primaryIndexValueCols.Contains(colID), nil
+		return !rh.primaryIndexValueCols.Contains(colID)
 	}
 	if cdatum, ok := value.(tree.CompositeDatum); ok {
 		// Composite columns are encoded in both the key and the value.
-		return !cdatum.IsComposite(), nil
+		return !cdatum.IsComposite()
 	}
 	// Skip primary key columns as their values are encoded in the key of
 	// each family. Family 0 is guaranteed to exist and acts as a
 	// sentinel.
-	return true, nil
+	return true
 }
 
 func (rh *RowHelper) SortedColumnFamily(famID descpb.FamilyID) ([]descpb.ColumnID, bool) {

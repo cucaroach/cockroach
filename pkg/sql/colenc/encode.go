@@ -29,18 +29,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
 type BatchEncoder struct {
-	rh              *row.RowHelper
-	b               coldata.Batch
-	p               row.Putter
-	colMap          catalog.TableColMap
-	partialIndexes  map[descpb.IndexID]coldata.Bools
-	familyToColumns map[descpb.FamilyID][]rowenc.ValueEncodedColumn
+	rh                 *row.RowHelper
+	b                  coldata.Batch
+	p                  row.Putter
+	colMap             catalog.TableColMap
+	partialIndexes     map[descpb.IndexID]coldata.Bools
+	familyToColumns    map[descpb.FamilyID][]rowenc.ValueEncodedColumn
+	compositeColumnIDs intsets.Fast
 }
 
 func MakeEncoder(rh *row.RowHelper,
@@ -218,13 +220,6 @@ func (b *BatchEncoder) EncodePK(ctx context.Context, ind catalog.Index) error {
 				continue
 			}
 
-			// FIXME: composite datum handling wrong
-			if skip, err := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); err != nil {
-				return err
-			} else if skip {
-				continue
-			}
-
 			col := fetchedCols[idx]
 			typ := col.GetType()
 			vec := vecs[idx]
@@ -238,6 +233,35 @@ func (b *BatchEncoder) EncodePK(ctx context.Context, ind catalog.Index) error {
 					}
 					continue
 				}
+
+				// Reuse this function but fake out the value and handle composites ourselves.
+				// TODO(cucaroach): this is yucky
+				if skip := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); skip {
+					if !b.compositeColumnIDs.Contains(int(colID)) {
+						continue
+					}
+					switch vec.CanonicalTypeFamily() {
+					case types.FloatFamily:
+						f := tree.DFloat(vec.Float64()[row])
+						if !f.IsComposite() {
+							continue
+						}
+					case types.DecimalFamily:
+						d := tree.DDecimal{vec.Decimal()[row]}
+						if !d.IsComposite() {
+							continue
+						}
+					default:
+						d := vec.Datum().Get(row)
+						if cdatum, ok := d.(tree.CompositeDatum); ok {
+							// Composite columns are encoded in both the key and the value.
+							if !cdatum.IsComposite() {
+								continue
+							}
+						}
+					}
+				}
+
 				if lastColIDs[row] > colID {
 					return errors.AssertionFailedf("cannot write column id %d after %d", colID, lastColIDs[row])
 				}

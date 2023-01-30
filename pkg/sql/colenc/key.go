@@ -93,6 +93,9 @@ func encodeKey(b []byte, typ *types.T, dir encoding.Direction, vec coldata.Vec, 
 func (b *BatchEncoder) encodeIndexKey(kys []roachpb.Key, keyCols []fetchpb.IndexFetchSpec_KeyColumn,
 	pkoffsets []int32, nulls coldata.Nulls) error {
 	for _, k := range keyCols {
+		if k.IsComposite {
+			b.compositeColumnIDs.Add(int(k.ColumnID))
+		}
 		dir, err := catalogkeys.IndexColumnEncodingDirection(k.Direction)
 		if err != nil {
 			return err
