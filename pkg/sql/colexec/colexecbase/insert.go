@@ -48,7 +48,7 @@ func NewInsertOp(ctx context.Context, flowCtx *execinfra.FlowCtx, spec *execinfr
 	desc := flowCtx.TableDescriptor(ctx, &spec.Table)
 	insCols := make([]catalog.Column, len(spec.ColumnIDs))
 	for i, c := range spec.ColumnIDs {
-		col, err := desc.FindColumnWithID(c)
+		col, err := catalog.MustFindColumnByID(desc, c)
 		if err != nil {
 			panic(err)
 		}
