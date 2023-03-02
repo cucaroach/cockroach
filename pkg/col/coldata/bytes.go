@@ -505,8 +505,6 @@ func abbreviate(bs []byte) uint64 {
 	return v << uint(8*(8-len(bs)))
 }
 
-var zeroElements = make([]element, MaxBatchSize)
-
 // Reset resets the underlying Bytes for reuse. It is a noop if b is a window
 // into another Bytes.
 //
@@ -524,8 +522,15 @@ func (b *Bytes) Reset() {
 	// the vector.
 	l := len(b.elements)
 	b.elements = b.elements[:cap(b.elements)]
-	for n := 0; n < len(b.elements); {
-		n += copy(b.elements[n:], zeroElements)
+	var bytes []byte
+	elementsHeader := (*reflect.SliceHeader)(unsafe.Pointer(&b.elements))
+	bytesHeader := (*reflect.SliceHeader)(unsafe.Pointer(&bytes))
+	bytesHeader.Data = elementsHeader.Data
+	bytesHeader.Len = len(b.elements) * int(ElementSize)
+	bytesHeader.Cap = len(b.elements) * int(ElementSize)
+	// This is optimized into memclrNoHeapPointers
+	for i := range bytes {
+		bytes[i] = 0
 	}
 	b.elements = b.elements[:l]
 	b.buffer = b.buffer[:0]
