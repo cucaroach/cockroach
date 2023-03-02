@@ -363,7 +363,7 @@ func TestLargeDynamicRows(t *testing.T) {
 
 	// Only copy-fast-path has proper row accounting, override metamorphic that
 	// might turn it off.
-	err := conn.Exec(ctx, fmt.Sprintf(`SET COPY_FAST_PATH_ENABLED = 'true'`))
+	err := conn.Exec(ctx, `SET COPY_FAST_PATH_ENABLED = 'true'`)
 	require.NoError(t, err)
 
 	// 4.0 MiB is minimum

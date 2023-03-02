@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
 
@@ -162,6 +163,7 @@ func (v *vectorInserter) Next() coldata.Batch {
 	for start < b.Length() {
 		if err := enc.PrepareBatch(ctx, p, start, end); err != nil {
 			if errors.Is(err, colenc.ErrOverMemLimit) {
+				log.VEventf(ctx, 2, "vector insert memory limit err %d, numrows: %d", start, end)
 				end /= 2
 				// If one row blows out memory limit, just do one row at a time.
 				if end <= start {
@@ -176,7 +178,7 @@ func (v *vectorInserter) Next() coldata.Batch {
 			}
 			colexecerror.ExpectedError(err)
 		}
-
+		log.VEventf(ctx, 2, "copy running batch, autocommit: %v, implicit: %v, final: %v, numrows: %d", v.autoCommit, v.txnImplicit, end == b.Length(), end-start)
 		var err error
 		if v.autoCommit && v.txnImplicit && end == b.Length() {
 			err = v.flowCtx.Txn.CommitInBatch(ctx, kvba.Batch)

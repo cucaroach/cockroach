@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -49,14 +48,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
+	"github.com/dustin/go-humanize"
 )
 
 // CopyBatchRowSizeDefault is the number of rows we insert in one insert
 // statement.
 const CopyBatchRowSizeDefault = 100
 
-// Vector wise inserts scale much better and this is an efficient default.
-const CopyBatchRowSizeVectorDefault = math.MaxUint16
+// Vector wise inserts scale much better and this is suitable default.
+// Empirically determined limit where we start to see diminishing speedups.
+const CopyBatchRowSizeVectorDefault = 32 << 10
 
 // When this many rows are in the copy buffer, they are inserted.
 var copyBatchRowSize = util.ConstantWithMetamorphicTestRange("copy-batch-size", CopyBatchRowSizeDefault, 1, 50_000)
@@ -339,43 +340,15 @@ func newCopyMachine(
 	c.processRows = c.insertRows
 	c.copyFastPath = c.p.SessionData().CopyFastPathEnabled
 
-	// We want to do as many rows as we can keeping things under working mem
-	// size. Conservatively target a fraction of kv command size. If we
+	// We want to do as many rows as we can keeping things under command mem
+	// limit. Conservatively target a fraction of kv command size. If we
 	// exceed this due to large dynamic values we will bail early and
-	// insert the rows we have so far.
-	c.maxRowMem = kvserverbase.MaxCommandSize.Get(c.p.execCfg.SV()) / 4
+	// insert the rows we have so far. Note once the coldata.Batch is full
+	// we still have all the encoder allocations to make.
+	c.maxRowMem = kvserverbase.MaxCommandSize.Get(c.p.execCfg.SV()) / 3
 
 	if c.canSupportVectorized(tableDesc) {
-		copyBatchRowSize = CopyBatchRowSizeVectorDefault
-
-		// Now adust default down based on EstimateBatchSizeBytes. Rather than
-		// try to unpack EstimateBatchSizeBytes just use a simple
-		// iterative algorithm to arrive at a reasonable batch size.
-		// Basically we want something from 100 to 64k but we don't
-		// want to have a bunch of unused memory in the coldata.Batch
-		// so dial it using EstimateBatchSizeBytes.
-		for colmem.EstimateBatchSizeBytes(typs, copyBatchRowSize) > c.maxRowMem &&
-			copyBatchRowSize > CopyBatchRowSizeDefault {
-			copyBatchRowSize /= 2
-		}
-		// Go back up by tenths to make up for 1/2 reduction overshoot.
-		for colmem.EstimateBatchSizeBytes(typs, copyBatchRowSize) < c.maxRowMem &&
-			copyBatchRowSize < math.MaxUint16 {
-			copyBatchRowSize += copyBatchRowSize / 10
-		}
-		if copyBatchRowSize > math.MaxUint16 {
-			copyBatchRowSize = math.MaxUint16
-		}
-		c.copyBatchRowSize = copyBatchRowSize
-		c.vectorized = true
-		factory := coldataext.NewExtendedColumnFactory(c.p.EvalContext())
-		c.alloc = colmem.NewLimitedAllocator(ctx, &c.rowsMemAcc, nil, factory)
-		// TODO(cucaroach): check that batch isnt unnecessarily allocating selection vector.
-		c.batch = c.alloc.NewMemBatchWithFixedCapacity(typs, c.copyBatchRowSize)
-		c.valueHandlers = make([]tree.ValueHandler, len(typs))
-		for i := range typs {
-			c.valueHandlers[i] = coldataext.MakeVecHandler(c.batch.ColVec(i))
-		}
+		c.initVectorizedCopy(ctx, typs)
 	} else {
 		c.copyBatchRowSize = copyBatchRowSize
 		c.vectorized = false
@@ -406,6 +379,72 @@ func (c *copyMachine) canSupportVectorized(table catalog.TableDescriptor) bool {
 	// join. TODO(cucaroach): extend the vectorized insert code to support
 	// insertFastPath style FK checks.
 	return len(table.EnforcedOutboundForeignKeys()) == 0
+}
+
+func (c *copyMachine) initVectorizedCopy(ctx context.Context, typs []*types.T) {
+	if buildutil.CrdbTestBuild {
+		// We have to honor metamorphic default in testing, the transaction
+		// commit tests rely on it, specifically they override it to
+		// 1.
+		c.copyBatchRowSize = copyBatchRowSize
+	} else {
+		batchSize := CopyBatchRowSizeVectorDefault
+		minBatchSize := 100
+		// When the coldata.Batch memory usage exceeds maxRowMem we flush the
+		// rows we have so we want the batch's initial memory usage to
+		// be smaller so we don't flush every row. We also want to
+		// leave a comfortable buffer so some dynamic values (ie
+		// strings, json) don't unnecessarily push us past the limit
+		// but if we encounter lots of huge dynamic values we do want
+		// to flush the batch.
+		targetBatchMemUsage := c.maxRowMem / 2
+
+		// Now adust batch size down based on EstimateBatchSizeBytes. Rather than
+		// try to unpack EstimateBatchSizeBytes just use a simple
+		// iterative algorithm to arrive at a reasonable batch size.
+		// Basically we want something from 100 to maxBatchSize but we
+		// don't want to have a bunch of unused memory in the
+		// coldata.Batch so dial it in using EstimateBatchSizeBytes.
+		for colmem.EstimateBatchSizeBytes(typs, batchSize) > targetBatchMemUsage &&
+			batchSize > minBatchSize {
+			batchSize /= 2
+		}
+		// Go back up by tenths to make up for 1/2 reduction overshoot.
+		for colmem.EstimateBatchSizeBytes(typs, batchSize) < targetBatchMemUsage &&
+			batchSize < CopyBatchRowSizeVectorDefault {
+			batchSize += batchSize / 10
+		}
+		if batchSize > CopyBatchRowSizeVectorDefault {
+			batchSize = CopyBatchRowSizeVectorDefault
+		}
+		c.copyBatchRowSize = batchSize
+	}
+	log.VEventf(ctx, 2, "vectorized copy chose %d for batch size", c.copyBatchRowSize)
+	c.vectorized = true
+	factory := coldataext.NewExtendedColumnFactory(c.p.EvalContext())
+	c.alloc = colmem.NewLimitedAllocator(ctx, &c.rowsMemAcc, nil, factory)
+	// TODO(cucaroach): check that batch isn't unnecessarily allocating selection vector.
+	c.batch = c.alloc.NewMemBatchWithFixedCapacity(typs, c.copyBatchRowSize)
+	initialMemUsage := c.rowsMemAcc.Used()
+	if initialMemUsage > c.maxRowMem {
+		// Some tests set the max raft command size lower and if the metamorphic
+		// batch size is big enough this can happen. The affect is
+		// that every row will be flushed which is fine for testing so
+		// ignore it.
+		if !buildutil.CrdbTestBuild {
+			// The logic above failed us, this shouldn't happen, basically this
+			// means EstimateBatchSizeBytes off by a factor of 2.
+			panic(errors.AssertionFailedf("EstimateBatchSizeBytes estimated %s for %d row but actual was %s and maxRowMem was %s",
+				humanize.IBytes(uint64(colmem.EstimateBatchSizeBytes(typs, c.copyBatchRowSize))),
+				c.copyBatchRowSize,
+				humanize.IBytes(uint64(initialMemUsage)),
+				humanize.IBytes(uint64(c.maxRowMem))))
+		}
+	}
+	c.valueHandlers = make([]tree.ValueHandler, len(typs))
+	for i := range typs {
+		c.valueHandlers[i] = coldataext.MakeVecHandler(c.batch.ColVec(i))
+	}
 }
 
 func (c *copyMachine) numInsertedRows() int {
@@ -602,6 +641,9 @@ func (c *copyMachine) processCopyData(ctx context.Context, data string, final bo
 		// them. Only set finalBatch to true if this is the last
 		// CopyData segment AND we have no more data in the buffer.
 		if len := c.currentBatchSize(); c.rowsMemAcc.Used() > c.maxRowMem || len == c.copyBatchRowSize {
+			if len != c.copyBatchRowSize {
+				log.VEventf(ctx, 2, "copy batch flushing due to memory usage %d > %d", c.rowsMemAcc.Used(), c.maxRowMem)
+			}
 			if err := c.processRows(ctx, final && c.buf.Len() == 0); err != nil {
 				return err
 			}
@@ -1055,6 +1097,7 @@ func (c *copyMachine) insertRowsInternal(ctx context.Context, finalBatch bool) (
 		},
 		Returning: tree.AbsentReturningClause,
 	}
+	// TODO(cucaroach): We shouldn't need to do this for every batch.
 	if err := c.p.makeOptimizerPlan(ctx); err != nil {
 		return err
 	}
