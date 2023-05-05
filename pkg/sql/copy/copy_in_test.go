@@ -22,9 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
@@ -35,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timetz"
 	"github.com/jackc/pgx/v4"
@@ -294,6 +297,123 @@ func TestCopyFromRandom(t *testing.T) {
 				t.Fatalf("row %v, col %v: got %#v (%T), expected %#v", row, i, ds, d, in[i])
 			}
 		}
+	}
+}
+
+func TestCopyFromRandomSchema(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	//	defer log.Scope(t).Close(t)
+
+	params, _ := tests.CreateTestServerParams()
+	s, db, kvdb := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.Background())
+
+	rng, _ := randutil.NewTestRand()
+	for i := 0; i < 100; i++ {
+		tableName := fmt.Sprintf("t%d", i)
+		ct := randgen.RandCreateTableWithName(rng, tableName, i, false /* isMultiRegion */)
+		tableDef := tree.Serialize(ct)
+		r := sqlutils.MakeSQLRunner(db)
+		r.Exec(t, tableDef)
+		desc := desctestutils.TestingGetTableDescriptor(
+			kvdb, keys.SystemSQLCodec, "defaultdb", "public", tableName)
+		cols := desc.WritableColumns()
+		var inputs [][]interface{}
+		colNames := []string{}
+		typs := []*types.T{}
+		for _, c := range cols {
+			if !(c.IsComputed() || c.IsHidden() || c.GetType() == types.Oid) {
+				colNames = append(colNames, c.GetName())
+				typs = append(typs, c.GetType())
+			}
+		}
+		txn, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmt, err := txn.Prepare(pq.CopyInSchema("public", tableName, colNames...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Just insert 1 row to avoid unique violations, this is a schema test.
+		for i := 0; i < 1; i++ {
+			row := make([]interface{}, len(colNames))
+			for j := range colNames {
+				var ds string
+				t := typs[j]
+				d := randgen.RandDatum(rng, t, false)
+				ds = tree.AsStringWithFlags(d, tree.FmtPgwireText)
+				switch t.Family() {
+				case types.CollatedStringFamily:
+					// For collated strings, we just want the raw contents in COPY.
+					ds = d.(*tree.DCollatedString).Contents
+				case types.FloatFamily:
+					ds = strings.TrimSuffix(ds, ".0")
+				case types.JsonFamily:
+					ds = strings.Trim(ds, "'")
+				}
+				row[j] = ds
+			}
+			_, err = stmt.Exec(row...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inputs = append(inputs, row)
+		}
+
+		err = stmt.Close()
+		if err != nil {
+			t.Log(inputs)
+			t.Fatal(err)
+		}
+		err = txn.Commit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		/*
+			rows, err := db.Query(fmt.Sprintf("SELECT * FROM %s", tableName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+
+			for row, in := range inputs {
+				if !rows.Next() {
+					t.Fatal("expected more results")
+				}
+				data := make([]interface{}, len(in))
+				for i := range data {
+					data[i] = new(interface{})
+				}
+				if err := rows.Scan(data...); err != nil {
+					t.Fatal(err)
+				}
+				for i, d := range data {
+					v := d.(*interface{})
+					d := *v
+					ds := fmt.Sprint(d)
+					switch d := d.(type) {
+					case []byte:
+						ds = string(d)
+					case time.Time:
+						var dt tree.NodeFormatter
+						if typs[i].Family() == types.TimeFamily {
+							dt = tree.MakeDTime(timeofday.FromTimeAllow2400(d))
+						} else if typs[i].Family() == types.TimeTZFamily {
+							dt = tree.NewDTimeTZ(timetz.MakeTimeTZFromTimeAllow2400(d))
+						} else if typs[i].Family() == types.TimestampFamily {
+							dt = tree.MustMakeDTimestamp(d, time.Microsecond)
+						} else {
+							dt = tree.MustMakeDTimestampTZ(d, time.Microsecond)
+						}
+						ds = tree.AsStringWithFlags(dt, tree.FmtBareStrings)
+					}
+					if !reflect.DeepEqual(in[i], ds) {
+						t.Fatalf("row %v, col %v: got %#v (%T), expected %#v", row, i, ds, d, in[i])
+					}
+				}
+			}
+		*/
 	}
 }
 
