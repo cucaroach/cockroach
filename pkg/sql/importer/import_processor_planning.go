@@ -14,6 +14,7 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"runtime/trace"
 	"sync/atomic"
 	"time"
 
@@ -71,6 +72,9 @@ func distImport(
 ) (kvpb.BulkOpSummary, error) {
 	ctx, sp := tracing.ChildSpan(ctx, "importer.distImport")
 	defer sp.Finish()
+
+	ctx, tsk := trace.NewTask(ctx, "import.distImport")
+	defer tsk.End()
 
 	dsp := execCtx.DistSQLPlanner()
 	makePlan := func(ctx context.Context, dsp *sql.DistSQLPlanner) (*sql.PhysicalPlan, *sql.PlanningCtx, error) {
@@ -260,6 +264,7 @@ func distImport(
 	})
 
 	g.GoCtx(func(ctx context.Context) error {
+		defer trace.StartRegion(ctx, "import-distsql-run").End()
 		defer cancelReplanner()
 		defer close(stopProgress)
 

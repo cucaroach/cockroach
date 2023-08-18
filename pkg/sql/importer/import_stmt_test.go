@@ -25,6 +25,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/trace"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -5411,15 +5413,34 @@ func setSmallIngestBufferSizes(t *testing.T, sqlDB *sqlutils.SQLRunner) {
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.bulk_ingest.index_buffer_size = '16MiB'`)
 }
 
+func traceTest(t *testing.T) func() {
+	if dir, err := os.Getwd(); err != nil {
+		t.Fatal(err)
+	} else {
+		if w, err := os.Create(dir + "/trace.out"); err != nil {
+			t.Fatal(err)
+		} else {
+			if err := trace.Start(w); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Println("tracing to: ", w.Name())
+			return trace.Stop
+		}
+	}
+	return func() {}
+}
+
 // TestImportWorkerFailure tests that IMPORT retries after the failure of a
 // worker node.
 func TestImportWorkerFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderStressWithIssue(t, 108547, "flaky test")
-	skip.UnderDeadlockWithIssue(t, 108547, "flaky test")
-	skip.UnderRaceWithIssue(t, 108547, "flaky test")
+	defer traceTest(t)()
+
+	// skip.UnderStressWithIssue(t, 108547, "flaky test")
+	// skip.UnderDeadlockWithIssue(t, 108547, "flaky test")
+	// skip.UnderRaceWithIssue(t, 108547, "flaky test")
 
 	allowResponse := make(chan struct{})
 	params := base.TestClusterArgs{}

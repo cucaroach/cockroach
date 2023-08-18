@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/trace"
 	"sync/atomic"
 	"time"
 
@@ -181,6 +182,7 @@ func newReadImportDataProcessor(
 // Start is part of the RowSource interface.
 func (idp *readImportDataProcessor) Start(ctx context.Context) {
 	ctx = logtags.AddTag(ctx, "job", idp.spec.JobID)
+	defer trace.StartRegion(ctx, "import-data-processor-start").End()
 	ctx = idp.StartInternal(ctx, readImportDataProcessorName)
 
 	grpCtx, cancel := context.WithCancel(ctx)
@@ -196,6 +198,7 @@ func (idp *readImportDataProcessor) Start(ctx context.Context) {
 
 // Next is part of the RowSource interface.
 func (idp *readImportDataProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
+	defer trace.StartRegion(idp.Ctx(), "import-data-processor-next").End()
 	if idp.State != execinfra.StateRunning {
 		return nil, idp.DrainHelper()
 	}
@@ -360,6 +363,9 @@ func ingestKvs(
 ) (*kvpb.BulkOpSummary, error) {
 	ctx, span := tracing.ChildSpan(ctx, "import-ingest-kvs")
 	defer span.Finish()
+
+	ctx, tsk := trace.NewTask(ctx, "import-ingest-kvs")
+	defer tsk.End()
 
 	defer flowCtx.Cfg.JobRegistry.MarkAsIngesting(spec.Progress.JobID)()
 

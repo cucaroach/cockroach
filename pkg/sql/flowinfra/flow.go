@@ -12,6 +12,7 @@ package flowinfra
 
 import (
 	"context"
+	"runtime/trace"
 	"sync"
 	"unsafe"
 
@@ -549,6 +550,7 @@ func (f *FlowBase) Resume(recv execinfra.RowReceiver) {
 
 // Run is part of the Flow interface.
 func (f *FlowBase) Run(ctx context.Context, noWait bool) {
+	defer trace.StartRegion(ctx, "flowbase.run").End()
 	if !noWait {
 		defer f.Wait()
 	}

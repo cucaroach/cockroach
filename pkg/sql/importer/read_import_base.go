@@ -19,6 +19,7 @@ import (
 	"io"
 	"math"
 	"net/url"
+	"runtime/trace"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -90,6 +91,7 @@ func runImport(
 		defer close(kvCh)
 		ctx, span := tracing.ChildSpan(ctx, "import-files-to-kvs")
 		defer span.Finish()
+		defer trace.StartRegion(ctx, "import-files-to-kvs").End()
 		var inputs map[int32]string
 		if spec.ResumePos != nil {
 			// Filter out files that were completely processed.
@@ -111,6 +113,7 @@ func runImport(
 	// at the end is one row containing an encoded BulkOpSummary.
 	var summary *kvpb.BulkOpSummary
 	group.GoCtx(func(ctx context.Context) error {
+		defer trace.StartRegion(ctx, "ingest-progress").End()
 		summary, err = ingestKvs(ctx, flowCtx, spec, progCh, kvCh)
 		if err != nil {
 			return err
@@ -593,6 +596,7 @@ func runParallelImport(
 	group.GoCtx(func(ctx context.Context) error {
 		var span *tracing.Span
 		ctx, span = tracing.ChildSpan(ctx, "import-rows-to-datums")
+		defer trace.StartRegion(ctx, "import-rows-to-datums").End()
 		defer span.Finish()
 		if importCtx.numWorkers <= 0 {
 			return errors.AssertionFailedf("invalid parallelism: %d", importCtx.numWorkers)
@@ -607,6 +611,7 @@ func runParallelImport(
 		defer close(importer.recordCh)
 		var span *tracing.Span
 		ctx, span = tracing.ChildSpan(ctx, "import-file-to-rows")
+		defer trace.StartRegion(ctx, "import-file-to-rows").End()
 		defer span.Finish()
 		var numSkipped int64
 		var count int64

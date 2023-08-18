@@ -17,6 +17,7 @@ import (
 	"math"
 	"net/url"
 	"path"
+	"runtime/trace"
 	"sort"
 	"strconv"
 	"strings"
@@ -424,6 +425,8 @@ func importPlanHook(
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, importStmt.StatementTag())
 		defer span.Finish()
+		ctx, tsk := trace.NewTask(ctx, "import-hook")
+		defer tsk.End()
 
 		if !(p.ExtendedEvalContext().TxnIsSingleStmt || isDetached) {
 			return errors.Errorf("IMPORT cannot be used inside a multi-statement transaction without DETACHED option")

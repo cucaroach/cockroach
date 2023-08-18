@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"runtime/trace"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cloud"
@@ -1252,6 +1253,7 @@ func ingestWithRetry(
 ) (kvpb.BulkOpSummary, error) {
 	ctx, sp := tracing.ChildSpan(ctx, "importer.ingestWithRetry")
 	defer sp.Finish()
+	defer trace.StartRegion(ctx, "importer.ingestWithRetry").End()
 
 	// We retry on pretty generic failures -- any rpc error. If a worker node were
 	// to restart, it would produce this kind of error, but there may be other
